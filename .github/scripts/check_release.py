@@ -1,3 +1,4 @@
+# Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
 """Refuse to overwrite an already published monthly version."""
 import json
 import os

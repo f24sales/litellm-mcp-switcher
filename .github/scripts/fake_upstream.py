@@ -1,3 +1,4 @@
+# Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
 """Runner-only HTTP fixture for candidate lifecycle checks."""
 import json
 import os

@@ -1,3 +1,4 @@
+# Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
 """Integration contract against real LiteLLM v1.106.2 on a GitHub runner."""
 import asyncio
 import json

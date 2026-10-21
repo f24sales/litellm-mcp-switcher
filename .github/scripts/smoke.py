@@ -1,3 +1,4 @@
+# Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
 """Runs inside the candidate on GitHub only; tests both listeners and role separation."""
 import json
 import os
