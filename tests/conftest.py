@@ -37,7 +37,7 @@ class FakeAPI:
         if path == "/key/info":
             return httpx.Response(200, json={"info": self.keys[request.headers["Authorization"].removeprefix("Bearer ")]})
         if path == "/team/info":
-            name = query["team_id"]
+            name = request.url.params["team_id"]
             return httpx.Response(200, json={"team_info": self.teams[name], "keys": [{"token": "redacted"}]})
         if path in {"/key/update", "/team/update"}:
             if self.fail_write:
