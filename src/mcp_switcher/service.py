@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 
-from .models import Problem, Selection
+from .models import Problem
 from .litellm import intersect
 
 

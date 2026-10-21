@@ -1,0 +1,26 @@
+[Unit]
+Description=LiteLLM MCP Switcher
+After=network-online.target litellm-database.service
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
+Pull=never
+ContainerName=litellm-mcp-switcher
+Network=core
+NetworkAlias=litellm-mcp-switcher
+EnvironmentFile=%h/.config/litellm-mcp-switcher/config.conf
+EnvironmentFile=%h/.config/litellm-mcp-switcher/.env
+Volume=litellm-mcp-switcher-sqlite.volume:/opt/f24sales/litellm-mcp-switcher/sqlite:Z
+NoNewPrivileges=true
+ReadOnly=true
+Tmpfs=/tmp:rw,nosuid,nodev,size=32m
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=25
+
+[Install]
+WantedBy=default.target

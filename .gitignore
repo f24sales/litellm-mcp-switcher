@@ -13,4 +13,4 @@ dist/
 *.sqlite*
 
 docker-compose.yml
-litellm-mcp-switcher.container
+/litellm-mcp-switcher.container

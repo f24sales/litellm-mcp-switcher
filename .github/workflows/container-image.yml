@@ -59,8 +59,43 @@ jobs:
         with:
           name: test-results
           path: pytest-results.xml
+  litellm-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: litellm
+        ports: ['5432:5432']
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install .
+      - name: Start the supported LiteLLM on the runner
+        run: |
+          docker run -d --name litellm-contract --network host \
+            -e DATABASE_URL=postgresql://postgres:test-password@127.0.0.1:5432/litellm \
+            -e LITELLM_MASTER_KEY=ci-master-00000000000000000000000000000000 \
+            ghcr.io/berriai/litellm-database:v1.106.2 --host 127.0.0.1 --port 4000
+      - name: Verify real MCP permission semantics
+        env:
+          CONTRACT_MASTER_KEY: ci-master-00000000000000000000000000000000
+        run: python .github/scripts/litellm_contract.py
+      - name: Show LiteLLM diagnostics on failure
+        if: failure()
+        run: docker logs --tail 100 litellm-contract
+      - name: Stop contract service
+        if: always()
+        run: docker rm -f litellm-contract || true
   build-test-publish:
-    needs: test
+    needs: [test, litellm-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
