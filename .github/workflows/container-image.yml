@@ -168,6 +168,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Protect immutable release versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: python3 .github/scripts/check_release.py
       - name: Publish the tested candidate
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}

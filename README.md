@@ -156,7 +156,7 @@ Role checks filter tool listings and also enforce calls against cached tool name
 
 Project versions prevent lost project updates. State revisions include the ceiling and effective active selection. Database operation leases serialize Switcher writes for the same user across access methods. Unrelated key/object-permission fields are preserved.
 
-The local database and LiteLLM are separate systems, so a single distributed transaction is not claimed. A write is successful only after read-back verification. Timeouts become uncertain operations and are reconciled against LiteLLM; no write is blindly retried. A crashed pending operation is reconciled after its lease expires. If the observed state differs, review it before issuing a new change.
+The local database and LiteLLM are separate systems, so a single distributed transaction is not claimed. A write is successful only after read-back verification. Timeouts become uncertain operations and are reconciled against LiteLLM; no write is blindly retried. A crashed pending operation is reconciled after its bounded lease expires (12 upstream request timeouts plus 60 seconds). If the observed state differs, review it before issuing a new change.
 
 Administrative revocation updates the team ceiling first, limiting direct LiteLLM use even if a later key cleanup fails. Stored projects remain owned records but cannot reactivate revoked access. Changes performed outside the Switcher between an upstream read and write cannot be made transactional by a client-only API; the preflight and post-write checks detect observable conflicts, while organizational use of one management path avoids this remaining race.
 
@@ -174,7 +174,7 @@ The same entry point, `litellm-mcp-switcher`, supervises both listeners on the h
 ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
 ```
 
-Versioned tags use `YYYY.M.N`. Source/revision/version labels identify the tested commit. The image runs as UID/GID 10001, with a read-only filesystem supported, a writable `/tmp`, and the selected persistent database.
+Versioned tags use `YYYY.M.N` and are immutable; increment `project.version` after a published release. Source/revision/version labels identify the tested commit. The image runs as UID/GID 10001, with a read-only filesystem supported, a writable `/tmp`, and the selected persistent database.
 
 `deploy/` contains a core-network Quadlet, SQLite volume and Caddy example. The host publication port remains installation-specific. Prefer Caddy-to-container routing over publishing database or backend ports.
 
