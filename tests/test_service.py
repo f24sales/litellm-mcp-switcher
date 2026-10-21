@@ -146,3 +146,31 @@ async def test_unsafe_group_configuration_fails_closed(setup):
     fake.keys[alice.litellm_key]["object_permission"]["mcp_access_groups"] = ["additive"]
     with pytest.raises(Problem, match="additive"):
         await service.state(alice)
+
+
+async def test_all_permitted_tools_resolves_to_team_subset(setup):
+    service, fake, (admin, alice, _) = setup
+    state = await service.state(admin, "alice")
+    await service.apply(admin, ApplyInput(selection=selection(tasks=["read"]), revision=state["revision"]),
+                        "alice", ceiling_change=True)
+    state = await service.state(alice)
+    result = await service.apply(alice, ApplyInput(selection=selection(tasks=None), revision=state["revision"]))
+    assert result["active"]["servers"] == {"tasks": ["read"]}
+
+
+async def test_partial_admin_update_is_not_reported_verified(setup):
+    service, fake, (admin, alice, _) = setup
+    state = await service.state(admin, "alice")
+    original = service.upstream.write_key
+
+    async def fail_key(*args):
+        raise Problem(502, "Key cleanup failed")
+
+    service.upstream.write_key = fail_key
+    with pytest.raises(Problem):
+        await service.apply(admin, ApplyInput(selection=selection(tasks=None), revision=state["revision"]),
+                            "alice", ceiling_change=True)
+    service.upstream.write_key = original
+    state = await service.state(alice)
+    assert state["operation"]["status"] == "conflict"
+    assert state["active"]["servers"] == {"tasks": None}

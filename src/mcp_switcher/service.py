@@ -8,8 +8,8 @@ from .models import Problem
 from .litellm import intersect
 
 
-def revision(ceiling, active):
-    value = {"ceiling": ceiling.model_dump(), "active": active.model_dump()}
+def revision(ceiling, active, raw=None):
+    value = {"ceiling": ceiling.model_dump(), "active": active.model_dump(), "raw": raw}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -35,27 +35,28 @@ class Service:
         info, team, ceiling, active = await self.upstream.scope(target, inventory)
         return target, inventory, info, team, ceiling, active
 
-    async def reconcile(self, target, ceiling, active):
+    async def reconcile(self, target, info, ceiling, active):
         operation = self.db.operation(target.name)
         if operation["status"] not in {"pending", "uncertain"}:
             return operation
         if operation["status"] == "pending" and operation["expires"] > time.time():
             return operation
         expected = operation["target"]
-        observed = ceiling if operation["kind"] == "ceiling" else active
-        if observed.model_dump() == expected:
+        observed = ({"ceiling": ceiling.model_dump(), "active": info["_switcher_raw_active"]}
+                    if operation["kind"] == "ceiling" else info["_switcher_raw_active"])
+        if observed == expected:
             self.db.finish(target.name, operation["id"], "verified", "Upstream result verified by reconciliation")
         else:
             self.db.finish(target.name, operation["id"], "conflict", "Upstream state differs; review before applying")
         return self.db.operation(target.name)
 
     async def state(self, actor, name=None):
-        target, inventory, _, _, ceiling, active = await self.snapshot(actor, name)
-        operation = await self.reconcile(target, ceiling, active)
+        target, inventory, info, _, ceiling, active = await self.snapshot(actor, name)
+        operation = await self.reconcile(target, info, ceiling, active)
         visible = inventory if actor.admin else [s for s in inventory if s["server_id"] in ceiling.servers]
         return {"user": target.name, "admin": actor.admin, "servers": visible,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
-                "revision": revision(ceiling, active), "projects": self.db.list_projects(target.name),
+                "revision": revision(ceiling, active, info["_switcher_raw_active"]), "projects": self.db.list_projects(target.name),
                 "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
                 "refresh_seconds": self.settings.webui_refresh_seconds}
 
@@ -82,8 +83,13 @@ class Service:
     async def validate(self, actor, selection, ceiling, inventory, name=None):
         if not set(selection.servers) <= {s["server_id"] for s in inventory}:
             raise Problem(422, "Selection contains a server missing from the current registry")
-        if not actor.admin and intersect(selection, ceiling) != selection:
-            raise Problem(403, "Selection exceeds the administrative access")
+        if not actor.admin:
+            if not set(selection.servers) <= set(ceiling.servers):
+                raise Problem(403, "Selection exceeds the administrative access")
+            for sid, selected in selection.servers.items():
+                upper = ceiling.servers[sid]
+                if selected is not None and upper is not None and not set(selected) <= set(upper):
+                    raise Problem(403, "Tool selection exceeds the administrative access")
         for server_id, tools in selection.servers.items():
             if tools is not None:
                 # An already valid explicit subset may be saved during an outage.
@@ -113,27 +119,32 @@ class Service:
         if ceiling_change and not actor.admin:
             raise Problem(403, "Administrative access required")
         target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)
-        if revision(ceiling, active) != data.revision:
+        if revision(ceiling, active, info["_switcher_raw_active"]) != data.revision:
             raise Problem(409, "Access changed since your last refresh; review the current state")
         await self.validate(actor, data.selection, ceiling, inventory, name)
-        if not ceiling_change and intersect(data.selection, ceiling) != data.selection:
+        if not ceiling_change and not set(data.selection.servers) <= set(ceiling.servers):
             raise Problem(403, "Selection exceeds the administrative access")
+        desired_active = intersect(active if ceiling_change else data.selection,
+                                   data.selection if ceiling_change else ceiling)
+        desired = ({"ceiling": data.selection.model_dump(), "active": desired_active.model_dump()}
+                   if ceiling_change else desired_active.model_dump())
         kind = "ceiling" if ceiling_change else "active"
-        with self.db.lease(target.name, kind, data.selection.model_dump()) as operation_id:
+        with self.db.lease(target.name, kind, desired) as operation_id:
             # Re-read after acquiring the cross-request lease.
             _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
-            if revision(upper, current) != data.revision:
+            if revision(upper, current, fresh_info["_switcher_raw_active"]) != data.revision:
                 self.db.finish(target.name, operation_id, "conflict", "Access changed before the update")
                 raise Problem(409, "Access changed before the update")
             if ceiling_change:
                 # Team is authoritative immediately, including during a partial failure.
                 await self.upstream.write_team(fresh_team, data.selection)
-                await self.upstream.write_key(target, fresh_info, intersect(current, data.selection))
+                await self.upstream.write_key(target, fresh_info, desired_active)
             else:
-                await self.upstream.write_key(target, fresh_info, data.selection)
-            _, _, _, _, actual_upper, actual = await self.snapshot(actor, name)
-            observed = actual_upper if ceiling_change else actual
-            if observed != data.selection:
+                await self.upstream.write_key(target, fresh_info, desired_active)
+            _, _, verified_info, _, actual_upper, actual = await self.snapshot(actor, name)
+            observed = ({"ceiling": actual_upper.model_dump(), "active": verified_info["_switcher_raw_active"]}
+                        if ceiling_change else verified_info["_switcher_raw_active"])
+            if observed != desired:
                 raise Problem(502, "LiteLLM did not confirm the requested permissions; reconcile before retrying")
             self.db.finish(target.name, operation_id, "verified", "Permissions verified in LiteLLM")
         return await self.state(actor, name)

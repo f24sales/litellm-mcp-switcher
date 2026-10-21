@@ -35,3 +35,21 @@ def test_invalid_groups_fail(monkeypatch, tmp_path, variable, value):
     monkeypatch.setenv(variable, value)
     with pytest.raises(ValueError):
         load_configuration()
+
+
+@pytest.mark.parametrize("web,mcp", [("1", "0"), ("0", "1"), ("1", "1")])
+def test_service_enablement(monkeypatch, tmp_path, web, mcp):
+    configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("WEBUI_ENABLED", web)
+    monkeypatch.setenv("MCP_ENABLED", mcp)
+    settings, _ = load_configuration()
+    assert settings.webui_enabled == (web == "1")
+    assert settings.mcp_enabled == (mcp == "1")
+
+
+def test_both_listeners_disabled_is_rejected(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("WEBUI_ENABLED", "0")
+    monkeypatch.setenv("MCP_ENABLED", "0")
+    with pytest.raises(ValueError):
+        load_configuration()

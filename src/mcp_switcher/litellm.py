@@ -89,6 +89,7 @@ class LiteLLM:
         # Empty key scope would inherit the team: show its real effective state.
         if not key_permission.get("mcp_servers") and not key_permission.get("mcp_tool_permissions"):
             active = ceiling
+        info["_switcher_raw_active"] = active.model_dump()
         active = intersect(active, ceiling)
         return info, team["team_info"], ceiling, active
 
