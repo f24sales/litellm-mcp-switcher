@@ -60,13 +60,13 @@ class Database:
             return dict(row)
 
     @contextmanager
-    def lease(self, owner, kind, target):
+    def lease(self, owner, kind, target, timeout=180):
         operation_id = str(uuid.uuid4())
         with self.engine.begin() as conn:
             changed = conn.execute(update(self.operations).where(
                 self.operations.c.owner == owner,
                 self.operations.c.status.not_in(["pending", "uncertain"])
-            ).values(id=operation_id, kind=kind, status="pending", expires=time.time() + 180,
+            ).values(id=operation_id, kind=kind, status="pending", expires=time.time() + timeout,
                      target=target, message="Awaiting verified LiteLLM state")).rowcount
         if changed != 1:
             raise Problem(409, "An operation needs reconciliation before another change")

@@ -129,7 +129,8 @@ class Service:
         desired = ({"ceiling": data.selection.model_dump(), "active": desired_active.model_dump()}
                    if ceiling_change else desired_active.model_dump())
         kind = "ceiling" if ceiling_change else "active"
-        with self.db.lease(target.name, kind, desired) as operation_id:
+        with self.db.lease(target.name, kind, desired,
+                           timeout=self.settings.litellm_request_timeout_seconds * 12 + 60) as operation_id:
             # Re-read after acquiring the cross-request lease.
             _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
             if revision(upper, current, fresh_info["_switcher_raw_active"]) != data.revision:
