@@ -13,6 +13,15 @@ def selection(**servers):
     return Selection(servers=servers)
 
 
+async def test_operation_epoch_timestamps_keep_subsecond_precision(setup):
+    service, _, (_, alice, _) = setup
+    expires = 1792626377.125
+    with service.db.engine.begin() as conn:
+        conn.execute(update(service.db.operations).where(service.db.operations.c.owner == alice.name)
+                     .values(expires=expires))
+    assert service.db.operation(alice.name)["expires"] == expires
+
+
 async def test_always_on_survives_clear_tool_filters_projects_and_admin_ceiling(setup):
     service, fake, (admin, original, bob) = setup
     alice = replace(original, always_on_mcps=("tasks",))

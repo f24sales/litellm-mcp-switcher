@@ -35,7 +35,7 @@ class Database:
         self.operations = Table(prefix + "_operations", self.metadata,
             Column("owner", String(64), primary_key=True), Column("id", String(36)),
             Column("kind", String(16)), Column("status", String(24), nullable=False),
-            Column("expires", Float, nullable=False), Column("target", JSON), Column("message", Text))
+            Column("expires", Float(53), nullable=False), Column("target", JSON), Column("message", Text))
 
     def migrate(self):
         config = Config()
