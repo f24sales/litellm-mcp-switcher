@@ -30,12 +30,12 @@ class FakeAPI:
         self.writes = []
 
     def response(self, request):
-        path, query = request.url.path, request.url.params
+        path = request.url.path
         body = json.loads(request.content) if request.content else {}
         if path == "/v1/mcp/server":
             return httpx.Response(200, json=self.registry)
         if path == "/key/info":
-            return httpx.Response(200, json={"info": self.keys[query["key"]]})
+            return httpx.Response(200, json={"info": self.keys[request.headers["Authorization"].removeprefix("Bearer ")]})
         if path == "/team/info":
             name = query["team_id"]
             return httpx.Response(200, json={"team_info": self.teams[name], "keys": [{"token": "redacted"}]})

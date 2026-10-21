@@ -75,7 +75,7 @@ class LiteLLM:
                 for s in data]
 
     async def scope(self, identity, inventory):
-        key = await self.request("GET", "/key/info", params={"key": identity.litellm_key})
+        key = await self.request("GET", "/key/info", token=identity.litellm_key)
         info = key["info"]
         if not info.get("team_id"):
             raise Problem(409, "A dedicated LiteLLM team is required for each managed key")

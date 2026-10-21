@@ -62,7 +62,7 @@ The dedicated administrative key needs these routes:
 
 Grant MCP discovery for the managed registry to this administrative identity, using the LiteLLM permission model. Do not grant LLM inference routes. The Switcher never returns management credentials, key values or upstream registry credentials to users.
 
-The assigned user key needs MCP inference routes. The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` marker is used for a complete opt-out, because an empty list can inherit team access. Empty tool selections disable that server instead of passing an inheriting empty tool list.
+The assigned user key needs MCP inference routes and `/key/info`. The latter is called with its Authorization header, never a key in the URL. The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` marker is used for a complete opt-out, because an empty list can inherit team access. Empty tool selections disable that server instead of passing an inheriting empty tool list.
 
 ### Database
 
