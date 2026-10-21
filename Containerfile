@@ -3,7 +3,7 @@ RUN apk add --no-cache python3 py3-pip python3-dev build-base libffi-dev openssl
 WORKDIR /source
 COPY pyproject.toml ./
 COPY src ./src
-RUN python3 -m pip wheel --break-system-packages --wheel-dir=/wheels .
+RUN python3 -m pip wheel --wheel-dir=/wheels .
 
 FROM docker.io/library/alpine:3.24.1
 RUN apk add --no-cache python3 py3-pip libpq ca-certificates libstdc++ \
