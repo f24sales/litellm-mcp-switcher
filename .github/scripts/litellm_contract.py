@@ -67,6 +67,9 @@ async def always_on_contract(req, master, key, optional_id):
                 tools = await req("GET", "/mcp-rest/tools/list?server_id=" + control_id, key=key)
                 assert {t["name"] for t in tools["tools"]} == {
                     "current_state", "discover_tools", "save_project", "delete_project", "apply_selection"}
+                for tool in tools["tools"]:
+                    if tool["name"] in {"save_project", "delete_project", "apply_selection"}:
+                        assert "USER AUTHORIZATION REQUIRED" in tool["description"]
                 await req("GET", "/mcp-rest/tools/list?server_id=" + optional_id, key=key, expected=403)
                 result = await req("POST", "/mcp-rest/tools/call", {"server_id": control_id,
                     "name": "current_state", "arguments": {}}, key=key)

@@ -159,6 +159,8 @@ Admin tools:
 
 Role checks filter tool listings and also enforce calls against cached tool names. Upstream MCP tools remain on LiteLLM's endpoint.
 
+Read-only tools carry `readOnlyHint: true`. Every mutating tool explicitly instructs agents to act only when the user requests that specific change, never as unsolicited setup, cleanup, optimization, or troubleshooting. Access updates require reading the current state and preserving unrelated selections. These descriptions and MCP annotations guide clients; authentication, ownership, ceilings, and always-on protection remain enforced by the backend.
+
 ## Concurrent changes and uncertain writes
 
 Project versions prevent lost project updates. State revisions include the ceiling and effective active selection. Database operation leases serialize Switcher writes for the same user across access methods. Unrelated key/object-permission fields are preserved.

@@ -51,9 +51,18 @@ def test_mcp_http_auth_catalog_and_cached_admin_call(setup):
         assert status == 200
         names = {t["name"] for t in data["result"]["tools"]}
         assert "current_state" in names and "admin_set_access" not in names
+        for tool in data["result"]["tools"]:
+            readonly = tool["name"] in {"current_state", "discover_tools"}
+            assert tool["annotations"]["readOnlyHint"] is readonly
+            if not readonly:
+                assert "USER AUTHORIZATION REQUIRED" in tool["description"]
+                assert "Never modify settings on your own initiative" in tool["description"]
         status, data = rpc(client, users[0].bearer, "tools/list")
         names = {t["name"] for t in data["result"]["tools"]}
         assert "admin_set_access" in names and "apply_selection" not in names
+        admin_write = next(t for t in data["result"]["tools"] if t["name"] == "admin_set_access")
+        assert "USER AUTHORIZATION REQUIRED" in admin_write["description"]
+        assert admin_write["annotations"]["readOnlyHint"] is False
         status, data = rpc(client, users[1].bearer, "tools/call", {"name": "admin_list_users", "arguments": {}})
         assert "error" in data or data.get("result", {}).get("isError")
         status, data = rpc(client, users[0].bearer, "tools/call", {"name": "admin_list_users", "arguments": {}})
