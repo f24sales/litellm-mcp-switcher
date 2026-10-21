@@ -17,6 +17,7 @@ class Identity:
     bearer: str
     litellm_key: str = ""
     admin: bool = False
+    always_on_mcps: tuple[str, ...] = ()
 
 
 class Settings(BaseSettings):
@@ -71,13 +72,17 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
         raise ValueError("Enable at least one service")
     users = [Identity("admin", admin, admin=True)]
     suffixes = sorted({m.group(1) or "" for k in values
-                       if (m := re.fullmatch(r"USER_(?:NAME|SWITCHER_BEARER|LITELLM_BEARER)(_\d{2,})?", k))})
+                       if (m := re.fullmatch(r"USER_(?:NAME|SWITCHER_BEARER|LITELLM_BEARER|ALWAYS_ON_MCPS)(_\d{2,})?", k))})
     keys = set()
     names = {"admin"}
     for suffix in suffixes:
         name, bearer, key = [values.get(k + suffix, "").strip() for k in
                              ("USER_NAME", "USER_SWITCHER_BEARER", "USER_LITELLM_BEARER")]
-        if not any((name, bearer, key)):
+        aliases = tuple(part.strip() for part in values.get("USER_ALWAYS_ON_MCPS" + suffix, "").split(",")
+                        if part.strip())
+        if len(set(aliases)) != len(aliases) or any(not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", a) for a in aliases):
+            raise ValueError("Always-on MCP aliases must be unique registry aliases")
+        if not any((name, bearer, key, aliases)):
             continue
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name) or min(len(bearer), len(key)) < 24:
             raise ValueError("Each user requires a valid name and two complete bearer tokens")
@@ -87,7 +92,7 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
             raise ValueError("Switcher bearer tokens must be unique")
         names.add(name)
         keys.add(key)
-        users.append(Identity(name, bearer, key))
+        users.append(Identity(name, bearer, key, always_on_mcps=aliases))
     if any(u.bearer in keys for u in users if not u.admin):
         raise ValueError("Switcher and LiteLLM bearer namespaces must be separate")
     if len(users) == 1:

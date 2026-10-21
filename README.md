@@ -41,15 +41,22 @@ Alternatively run `./config.sh` to use the existing New/Skip configuration flow 
 User repeat group:
 
 ```dotenv
-#repeat-group: USER suffix02 USER_NAME USER_SWITCHER_BEARER USER_LITELLM_BEARER
+#repeat-group: USER suffix02 USER_NAME USER_SWITCHER_BEARER USER_LITELLM_BEARER USER_ALWAYS_ON_MCPS
 USER_NAME=rafael
 #secret
 USER_SWITCHER_BEARER=
 #secret
 USER_LITELLM_BEARER=
+USER_ALWAYS_ON_MCPS=
 ```
 
 New creates `_02`, `_03`, etc.; Skip stops adding groups. Duplicate names, duplicate assigned keys, duplicate login tokens and incomplete groups are rejected. There is no admin-name variable.
+
+`USER_ALWAYS_ON_MCPS` optionally lists comma-separated LiteLLM registry aliases for this user. Blank preserves the default behavior. For example, register `switcher_rafael` at `http://litellm-mcp-switcher:8000/mcp` using Rafael's **Switcher** bearer, grant it to his dedicated team/key, then set `USER_ALWAYS_ON_MCPS=switcher_rafael`. Other users require their own aliases and Switcher credentials; never share a user-bound control alias across users.
+
+Always-on MCPs remain enabled with all their tools when applying selections, saving projects, clearing all optional servers, or updating an administrative ceiling. The Web UI marks them **Always enabled** and disables their selection controls. Protection is enforced in the backend for REST and MCP calls too. The configured aliases must exist uniquely in the registry and have unrestricted tools in the user's team ceiling; the Switcher never bypasses a missing upstream grant. An administrator can remove this protection by changing the private configuration.
+
+With this arrangement a client can connect only to LiteLLM and see both the fixed Switcher control tools and the currently selected upstream tools. Whether a client refreshes its tool catalog during an existing chat must be checked in that client; permission changes do not guarantee a client-side refresh.
 
 ### LiteLLM management permissions
 
@@ -131,7 +138,7 @@ Selections use stable LiteLLM server IDs:
 }
 ```
 
-An empty `servers` object disables all MCP access. Project writes additionally take `name` and, for updates, `version`. Unknown request fields are rejected. The public `/openapi.json` describes schemas, not credentials. `/healthz` indicates local WebUI listener readiness; authenticated state/discovery reports upstream availability.
+An empty `servers` object disables all optional MCP access. Configured always-on MCPs retain all their tools; without configured aliases, empty still disables every MCP. State responses include `always_on_mcps` as resolved server IDs. Project writes additionally take `name` and, for updates, `version`. Unknown request fields are rejected. The public `/openapi.json` describes schemas, not credentials. `/healthz` indicates local WebUI listener readiness; authenticated state/discovery reports upstream availability.
 
 ## MCP tools
 

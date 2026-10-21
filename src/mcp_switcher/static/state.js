@@ -1,4 +1,9 @@
 // A generation counter protects edits from requests that were already in flight.
+export function preserveAlwaysOn(selection, ids = []) {
+  for (const id of ids) selection.servers[id] = null;
+  return selection;
+}
+
 export class Draft {
   constructor() { this.epoch = 0; this.dirty = false; this.conflict = false; this.revision = null; this.selection = {servers: {}}; }
   edit(selection) { this.selection = structuredClone(selection); this.dirty = true; this.epoch++; }

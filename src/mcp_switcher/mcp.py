@@ -61,8 +61,9 @@ def create_mcp(service, identities):
     async def apply_selection(selection: Selection, revision: str) -> dict:
         """Activate your complete MCP selection. Obtain revision from current_state first.
 
-        An empty servers object disables all MCP access. This affects every client using
-        your assigned LiteLLM key. It never changes LLM settings.
+        An empty servers object disables optional MCPs. Configured always-on MCPs and
+        all their tools are retained. This affects every client using your assigned
+        LiteLLM key. It never changes LLM settings.
         """
         return await run(service.apply(actor(), ApplyInput(selection=selection, revision=revision)))
 

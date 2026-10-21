@@ -4,10 +4,79 @@ import asyncio
 import json
 import os
 import threading
+import tempfile
+from pathlib import Path
 
 import httpx
 import uvicorn
 from fastmcp import FastMCP
+from pydantic import SecretStr
+
+from mcp_switcher.config import Identity, Settings
+from mcp_switcher.db import Database
+from mcp_switcher.litellm import LiteLLM
+from mcp_switcher.mcp import create_mcp
+from mcp_switcher.service import Service
+
+
+async def always_on_contract(req, master, key, optional_id):
+    """Call the real Switcher through LiteLLM, including after clearing every optional MCP."""
+    settings = Settings(litellm_admin_virtual_key=SecretStr(master),
+                        litellm_api_base_url="http://127.0.0.1:4000")
+    admin = Identity("admin", master, admin=True)
+    user = Identity("contract", "ci-switcher-" + "s" * 40, key,
+                    always_on_mcps=("switcher_contract",))
+    with tempfile.TemporaryDirectory() as directory:
+        db = Database("sqlite:///" + str(Path(directory) / "switcher.sqlite3"), "contract")
+        db.migrate()
+        db.initialize_owners([user.name])
+        upstream = LiteLLM(settings)
+        service = Service(db, upstream, [admin, user], settings)
+        mcp = create_mcp(service, [admin, user])
+        server = uvicorn.Server(uvicorn.Config(mcp.http_app(path="/mcp", stateless_http=True),
+            host="127.0.0.1", port=8998, log_level="error"))
+        task = asyncio.create_task(server.serve())
+        try:
+            for _ in range(100):
+                if server.started:
+                    break
+                if task.done():
+                    task.result()
+                    raise AssertionError("Switcher MCP stopped before becoming ready")
+                await asyncio.sleep(.1)
+            assert server.started
+            registered = await req("POST", "/v1/mcp/server", {
+                "server_name": "switcher_contract", "alias": "switcher_contract",
+                "url": "http://127.0.0.1:8998/mcp", "transport": "http", "auth_type": "bearer_token",
+                "credentials": {"auth_value": user.bearer}, "allow_all_keys": False,
+                "available_on_public_internet": False}, expected=(200, 201))
+            control_id = registered["server_id"]
+            permission = {"mcp_servers": [optional_id, control_id]}
+            await req("POST", "/team/update", {"team_id": "contract", "object_permission": permission})
+            await req("POST", "/key/update", {"key": key, "object_permission": permission,
+                "allowed_routes": ["mcp_inference_routes", "/key/info"]})
+            for selection in ({"servers": {}}, {"servers": {control_id: ["current_state"]}}):
+                state = await service.state(user)
+                result = await req("POST", "/mcp-rest/tools/call", {"server_id": control_id,
+                    "name": "apply_selection", "arguments": {"selection": selection,
+                    "revision": state["revision"]}}, key=key)
+                assert not result.get("isError"), result
+                state = await service.state(user)
+                assert state["active"] == {"servers": {control_id: None}}, state
+                assert state["operation"]["status"] == "verified"
+                tools = await req("GET", "/mcp-rest/tools/list?server_id=" + control_id, key=key)
+                assert {t["name"] for t in tools["tools"]} == {
+                    "current_state", "discover_tools", "save_project", "delete_project", "apply_selection"}
+                await req("GET", "/mcp-rest/tools/list?server_id=" + optional_id, key=key, expected=403)
+                result = await req("POST", "/mcp-rest/tools/call", {"server_id": control_id,
+                    "name": "current_state", "arguments": {}}, key=key)
+                assert not result.get("isError"), result
+            print("Always-on contract: real user Switcher tools remain callable through LiteLLM after clear-all and tool restriction")
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, timeout=15)
+            await upstream.close()
+            db.close()
 
 
 async def main():
@@ -68,6 +137,7 @@ async def main():
             "mcp_servers": ["no-mcp-servers"]}})
         await req("GET", "/mcp-rest/tools/list?server_id=" + sid, key=key, expected=403)
         await req("POST", "/v1/chat/completions", {"model": "none", "messages": []}, key=key, expected=403)
+        await always_on_contract(req, master, key, sid)
     server.should_exit = True
     thread.join(timeout=10)
     print("Real LiteLLM contract: explicit opt-out, tool restriction, cached-call denial, team ceiling, LLM denial passed")

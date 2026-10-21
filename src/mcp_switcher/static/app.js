@@ -1,4 +1,4 @@
-import { Draft } from './state.js';
+import { Draft, preserveAlwaysOn } from './state.js';
 const $ = id => document.getElementById(id);
 const draft = new Draft();
 let token = '', identity, latest, projectId = '', timer, busy = false, refreshId = 0;
@@ -20,6 +20,7 @@ async function api(path, options = {}) {
 function base() { return identity.admin ? `/api/admin/users/${encodeURIComponent($('admin-user').value)}` : '/api'; }
 function statePath() { return identity.admin ? base() : '/api/state'; }
 function selectionChanged() {
+  preserveAlwaysOn(draft.selection, latest?.always_on_mcps);
   draft.edit(draft.selection);
   updateActions(); renderCards();
 }
@@ -48,6 +49,7 @@ async function refresh(force = false) {
     if (id !== refreshId || path !== statePath()) return;
     latest = state;
     if (force) draft.reset(state, identity.admin); else draft.accept(state, epoch, identity.admin);
+    preserveAlwaysOn(draft.selection, state.always_on_mcps);
     rebuildProjects(); renderCards(); updateActions();
     $('sync-state').textContent = `Synced ${new Date().toLocaleTimeString()}`;
     $('operation').hidden = !['pending', 'uncertain', 'conflict'].includes(state.operation.status);
@@ -61,11 +63,13 @@ function renderCards() {
   $('empty').hidden = latest.servers.length > 0;
   for (const server of latest.servers) {
     const sid = server.server_id;
+    const pinned = latest.always_on_mcps?.includes(sid);
     if (!`${server.alias} ${server.server_name}`.toLowerCase().includes(search)) continue;
     const selected = Object.hasOwn(draft.selection.servers, sid);
     const card = node('article', '', `server${selected ? ' selected' : ''}`);
     const head = node('div', '', 'server-head');
     const check = node('input', '', 'server-check'); check.type = 'checkbox'; check.checked = selected;
+    check.disabled = pinned;
     check.setAttribute('aria-label', `Select ${server.alias || server.server_name}`);
     check.onchange = () => {
       if (check.checked) draft.selection.servers[sid] = null; else delete draft.selection.servers[sid];
@@ -73,6 +77,7 @@ function renderCards() {
     };
     const heading = node('div', '', 'server-heading');
     heading.append(node('h2', server.server_name || server.alias, 'server-title'), node('div', server.alias, 'alias'));
+    if (pinned) heading.append(node('div', 'Always enabled', 'status reachable'));
     const entry = catalog.get(sid);
     head.append(check, heading, node('span', entry?.status || 'unknown', `status ${entry?.status || ''}`));
     card.append(head);
@@ -106,15 +111,18 @@ function renderTools(sid, body) {
     }; body.append(retry); return;
   }
   const selected = Object.hasOwn(draft.selection.servers, sid);
+  const pinned = latest.always_on_mcps?.includes(sid);
   const chosen = draft.selection.servers[sid];
   const actions = node('div', '', 'tool-actions');
   const all = node('button', 'All permitted tools'); all.onclick = () => { draft.selection.servers[sid] = null; selectionChanged(); };
   const none = node('button', 'Disable server'); none.onclick = () => { delete draft.selection.servers[sid]; selectionChanged(); };
+  all.disabled = none.disabled = pinned;
   actions.append(all, none); body.append(actions);
   const list = node('div', '', 'tool-list');
   for (const tool of entry.tools) {
     const row = node('label', '', 'tool-row'), check = node('input'); check.type = 'checkbox';
     check.checked = selected && (chosen === null || chosen.includes(tool.name));
+    check.disabled = pinned;
     check.onchange = () => {
       const names = new Set(selected ? (chosen === null ? entry.tools.map(t => t.name) : chosen) : []);
       if (check.checked) names.add(tool.name); else names.delete(tool.name);
@@ -170,6 +178,7 @@ $('project').onchange = () => {
   projectId = $('project').value;
   const project = latest.projects.find(p => p.id === projectId);
   if (project) draft.edit(project.selection); else draft.reset(latest, identity.admin);
+  preserveAlwaysOn(draft.selection, latest.always_on_mcps);
   renderCards(); updateActions();
 };
 $('new-project').onclick = () => guarded(() => saveProject(false, true));

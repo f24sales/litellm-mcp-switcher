@@ -63,3 +63,23 @@ def test_cross_user_bearer_role_collision_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("USER_LITELLM_BEARER_02", "bob-litellm-" + "l" * 40)
     with pytest.raises(ValueError, match="namespaces"):
         load_configuration()
+
+
+def test_always_on_aliases_belong_to_each_repeat_group(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("USER_ALWAYS_ON_MCPS", "switcher_alice, other_control")
+    monkeypatch.setenv("USER_NAME_02", "bob")
+    monkeypatch.setenv("USER_SWITCHER_BEARER_02", "bob-switcher-" + "s" * 40)
+    monkeypatch.setenv("USER_LITELLM_BEARER_02", "bob-litellm-" + "l" * 40)
+    monkeypatch.setenv("USER_ALWAYS_ON_MCPS_02", "switcher_bob")
+    _, users = load_configuration()
+    assert users[1].always_on_mcps == ("switcher_alice", "other_control")
+    assert users[2].always_on_mcps == ("switcher_bob",)
+
+
+@pytest.mark.parametrize("aliases", ["duplicate,duplicate", "not an alias", "https://example.com/mcp"])
+def test_invalid_always_on_aliases_rejected(monkeypatch, tmp_path, aliases):
+    configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("USER_ALWAYS_ON_MCPS", aliases)
+    with pytest.raises(ValueError, match="aliases"):
+        load_configuration()

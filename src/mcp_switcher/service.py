@@ -8,8 +8,9 @@ from .models import Problem
 from .litellm import intersect
 
 
-def revision(ceiling, active, raw=None):
-    value = {"ceiling": ceiling.model_dump(), "active": active.model_dump(), "raw": raw}
+def revision(ceiling, active, raw=None, always_on=()):
+    value = {"ceiling": ceiling.model_dump(), "active": active.model_dump(), "raw": raw,
+             "always_on": sorted(always_on)}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -35,6 +36,18 @@ class Service:
         info, team, ceiling, active = await self.upstream.scope(target, inventory)
         return target, inventory, info, team, ceiling, active
 
+    def always_on(self, target, inventory):
+        servers = {}
+        for alias in target.always_on_mcps:
+            matches = [s["server_id"] for s in inventory if s.get("alias") == alias]
+            if len(matches) != 1:
+                raise Problem(409, "An always-on MCP alias is missing or ambiguous in the LiteLLM registry")
+            servers[matches[0]] = None
+        return servers
+
+    def protect(self, target, inventory, selection):
+        return selection.model_copy(update={"servers": {**selection.servers, **self.always_on(target, inventory)}})
+
     async def reconcile(self, target, info, ceiling, active):
         operation = self.db.operation(target.name)
         if operation["status"] not in {"pending", "uncertain"}:
@@ -56,7 +69,9 @@ class Service:
         visible = inventory if actor.admin else [s for s in inventory if s["server_id"] in ceiling.servers]
         return {"user": target.name, "admin": actor.admin, "servers": visible,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
-                "revision": revision(ceiling, active, info["_switcher_raw_active"]), "projects": self.db.list_projects(target.name),
+                "always_on_mcps": list(self.always_on(target, inventory)),
+                "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps),
+                "projects": self.db.list_projects(target.name),
                 "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
                 "refresh_seconds": self.settings.webui_refresh_seconds}
 
@@ -86,6 +101,9 @@ class Service:
         if not actor.admin:
             if not set(selection.servers) <= set(ceiling.servers):
                 raise Problem(403, "Selection exceeds the administrative access")
+            for sid in self.always_on(self.target(actor, name), inventory):
+                if ceiling.servers[sid] is not None:
+                    raise Problem(409, "Always-on MCPs require unrestricted tools in the administrative ceiling")
             for sid, selected in selection.servers.items():
                 upper = ceiling.servers[sid]
                 if selected is not None and upper is not None and not set(selected) <= set(upper):
@@ -105,7 +123,8 @@ class Service:
     async def save_project(self, actor, data, project_id=None):
         if actor.admin:
             raise Problem(403, "Use a user identity to manage projects")
-        _, inventory, _, _, ceiling, _ = await self.snapshot(actor)
+        target, inventory, _, _, ceiling, _ = await self.snapshot(actor)
+        data = data.model_copy(update={"selection": self.protect(target, inventory, data.selection)})
         await self.validate(actor, data.selection, ceiling, inventory)
         return self.db.save_project(actor.name, data, project_id)
 
@@ -119,26 +138,29 @@ class Service:
         if ceiling_change and not actor.admin:
             raise Problem(403, "Administrative access required")
         target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)
-        if revision(ceiling, active, info["_switcher_raw_active"]) != data.revision:
+        if revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps) != data.revision:
             raise Problem(409, "Access changed since your last refresh; review the current state")
-        await self.validate(actor, data.selection, ceiling, inventory, name)
-        if not ceiling_change and not set(data.selection.servers) <= set(ceiling.servers):
+        selected = self.protect(target, inventory, data.selection)
+        await self.validate(actor, selected, ceiling, inventory, name)
+        if not ceiling_change and not set(selected.servers) <= set(ceiling.servers):
             raise Problem(403, "Selection exceeds the administrative access")
-        desired_active = intersect(active if ceiling_change else data.selection,
-                                   data.selection if ceiling_change else ceiling)
-        desired = ({"ceiling": data.selection.model_dump(), "active": desired_active.model_dump()}
+        desired_active = intersect(active if ceiling_change else selected,
+                                   selected if ceiling_change else ceiling)
+        if ceiling_change:
+            desired_active = self.protect(target, inventory, desired_active)
+        desired = ({"ceiling": selected.model_dump(), "active": desired_active.model_dump()}
                    if ceiling_change else desired_active.model_dump())
         kind = "ceiling" if ceiling_change else "active"
         with self.db.lease(target.name, kind, desired,
                            timeout=self.settings.litellm_request_timeout_seconds * 12 + 60) as operation_id:
             # Re-read after acquiring the cross-request lease.
             _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
-            if revision(upper, current, fresh_info["_switcher_raw_active"]) != data.revision:
+            if revision(upper, current, fresh_info["_switcher_raw_active"], target.always_on_mcps) != data.revision:
                 self.db.finish(target.name, operation_id, "conflict", "Access changed before the update")
                 raise Problem(409, "Access changed before the update")
             if ceiling_change:
                 # Team is authoritative immediately, including during a partial failure.
-                await self.upstream.write_team(fresh_team, data.selection)
+                await self.upstream.write_team(fresh_team, selected)
                 await self.upstream.write_key(target, fresh_info, desired_active)
             else:
                 await self.upstream.write_key(target, fresh_info, desired_active)

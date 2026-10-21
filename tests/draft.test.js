@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {Draft} from '../src/mcp_switcher/static/state.js';
+import {Draft, preserveAlwaysOn} from '../src/mcp_switcher/static/state.js';
 const state = (revision, servers) => ({revision, active:{servers}, ceiling:{servers}});
+test('clear-all and project tool subsets retain all always-on tools', () => {
+  assert.deepEqual(preserveAlwaysOn({servers:{}}, ['control']), {servers:{control:null}});
+  assert.deepEqual(preserveAlwaysOn({servers:{control:['one'], optional:['read']}}, ['control']),
+    {servers:{control:null, optional:['read']}});
+  assert.deepEqual(preserveAlwaysOn({servers:{}}), {servers:{}});
+});
 test('in-flight refresh cannot overwrite a local edit', () => {
   const draft = new Draft(); draft.accept(state('old', {a:null}), 0);
   const captured = draft.epoch;

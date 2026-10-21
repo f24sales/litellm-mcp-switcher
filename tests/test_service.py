@@ -1,5 +1,6 @@
 import copy
 import time
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import update
@@ -10,6 +11,56 @@ from mcp_switcher.litellm import DENY
 
 def selection(**servers):
     return Selection(servers=servers)
+
+
+async def test_always_on_survives_clear_tool_filters_projects_and_admin_ceiling(setup):
+    service, fake, (admin, original, bob) = setup
+    alice = replace(original, always_on_mcps=("tasks",))
+    service.users[alice.name] = alice
+    before = copy.deepcopy(fake.keys[alice.litellm_key])
+    for selected in (selection(), selection(tasks=["read"]), selection(tasks=[])):
+        state = await service.state(alice)
+        assert state["always_on_mcps"] == ["tasks"]
+        result = await service.apply(alice, ApplyInput(selection=selected, revision=state["revision"]))
+        assert result["active"]["servers"] == {"tasks": None}
+        assert fake.keys[alice.litellm_key]["object_permission"]["mcp_tool_permissions"] == {}
+    project = await service.save_project(alice, ProjectInput(name="No optional servers", selection=selection()))
+    assert project["selection"] == {"servers": {"tasks": None}}
+    state = await service.state(admin, alice.name)
+    result = await service.apply(admin, ApplyInput(selection=selection(), revision=state["revision"]),
+                                 alice.name, ceiling_change=True)
+    assert result["ceiling"]["servers"] == {"tasks": None}
+    assert result["active"]["servers"] == {"tasks": None}
+    bob_state = await service.state(bob)
+    result = await service.apply(bob, ApplyInput(selection=selection(), revision=bob_state["revision"]))
+    assert result["active"]["servers"] == {}
+    assert fake.keys[bob.litellm_key]["object_permission"]["mcp_servers"] == [DENY]
+    for field in ("models", "budget_id", "team_id"):
+        assert fake.keys[alice.litellm_key][field] == before[field]
+
+
+async def test_always_on_does_not_bypass_team_tool_restrictions(setup):
+    service, fake, (_, original, _) = setup
+    alice = replace(original, always_on_mcps=("tasks",))
+    fake.teams[alice.name]["object_permission"]["mcp_tool_permissions"] = {"tasks": ["read"]}
+    state = await service.state(alice)
+    with pytest.raises(Problem, match="unrestricted tools"):
+        await service.apply(alice, ApplyInput(selection=selection(), revision=state["revision"]))
+    assert fake.writes == []
+
+
+async def test_missing_ambiguous_alias_and_changed_configuration_fail_closed(setup):
+    service, fake, (_, alice, _) = setup
+    state = await service.state(alice)
+    with pytest.raises(Problem, match="changed"):
+        await service.apply(replace(alice, always_on_mcps=("tasks",)),
+                            ApplyInput(selection=selection(), revision=state["revision"]))
+    with pytest.raises(Problem, match="missing or ambiguous"):
+        await service.state(replace(alice, always_on_mcps=("absent",)))
+    fake.registry.append({"server_id": "different", "alias": "tasks", "server_name": "Duplicate"})
+    with pytest.raises(Problem, match="missing or ambiguous"):
+        await service.state(replace(alice, always_on_mcps=("tasks",)))
+    assert fake.writes == []
 
 
 async def test_projects_owned_versioned_and_persistent(setup):
