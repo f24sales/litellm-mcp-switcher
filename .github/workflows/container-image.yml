@@ -143,22 +143,18 @@ jobs:
             if [ "$mode" = mcp ]; then web=0; fi
             container=$(docker run --pull=never -d --network none --read-only --tmpfs /tmp \
               -v "$volume:/opt/f24sales/litellm-mcp-switcher/sqlite" \
+              -v "$GITHUB_WORKSPACE/.github/scripts:/ci-tests:ro" \
               -e LITELLM_ADMIN_VIRTUAL_KEY=ci-admin-00000000000000000000000000000000 \
               -e USER_NAME=ci-user \
               -e USER_SWITCHER_BEARER=ci-switcher-00000000000000000000000000000000 \
               -e USER_LITELLM_BEARER=ci-litellm-00000000000000000000000000000000 \
               -e LITELLM_API_BASE_URL=http://127.0.0.1:4000 \
               -e WEBUI_ENABLED="$web" -e MCP_ENABLED="$mcp" "mcp-switcher-candidate:${GITHUB_SHA}")
-            docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
-            docker cp .github/scripts/fake_upstream.py "$container:/tmp/fake_upstream.py"
-            docker exec -d "$container" python3 /tmp/fake_upstream.py
-            # docker cp cannot write a read-only root; /tmp is a dedicated writable tmpfs.
-            docker exec "$container" python3 /tmp/smoke.py
+            docker exec -d "$container" python3 /ci-tests/fake_upstream.py
+            docker exec "$container" python3 /ci-tests/smoke.py
             docker restart "$container" >/dev/null
-            docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
-            docker cp .github/scripts/fake_upstream.py "$container:/tmp/fake_upstream.py"
-            docker exec -d "$container" python3 /tmp/fake_upstream.py
-            docker exec "$container" python3 /tmp/smoke.py restart
+            docker exec -d "$container" python3 /ci-tests/fake_upstream.py
+            docker exec "$container" python3 /ci-tests/smoke.py restart
             docker stop --time 20 "$container" >/dev/null
             [ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ]
             docker rm "$container" >/dev/null; container=""
