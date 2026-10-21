@@ -1,4 +1,3 @@
 [Volume]
 VolumeName=litellm-mcp-switcher-sqlite
-UID=10001
-GID=10001
+PodmanArgs=--uid=10001 --gid=10001
