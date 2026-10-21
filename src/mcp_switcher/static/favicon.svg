@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>MCP Switcher</title>
+  <rect width="64" height="64" rx="18" fill="#203c3b"/>
+  <path d="M14 22c6-8 12 8 18 0s12 8 18 0M14 32c6-8 12 8 18 0s12 8 18 0M14 42c6-8 12 8 18 0s12 8 18 0" fill="none" stroke="#69dfc0" stroke-width="4" stroke-linecap="round"/>
+</svg>
