@@ -12,7 +12,7 @@ from .models import ApplyInput, Problem, ProjectInput
 
 
 def create_web(service, identities):
-    app = FastAPI(title="LiteLLM MCP Switcher", version="2026.10.2", docs_url=None, redoc_url=None)
+    app = FastAPI(title="LiteLLM MCP Switcher", version="2026.10.3", docs_url=None, redoc_url=None)
     package = Path(__file__).parent
     app.mount("/static", StaticFiles(directory=package / "static"), name="static")
     templates = Jinja2Templates(directory=package / "templates")

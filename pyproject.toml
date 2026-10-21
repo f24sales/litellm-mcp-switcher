@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "litellm-mcp-switcher"
-version = "2026.10.2"
+version = "2026.10.3"
 description = "Project-based MCP access selection for existing LiteLLM virtual keys"
 requires-python = ">=3.11"
 dependencies = [
