@@ -4,6 +4,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import sys
 
 
 def request(url, bearer=None, payload=None):
@@ -36,10 +37,31 @@ for port, enabled in [(8080, web), (8000, mcp)]:
             time.sleep(1)
     else:
         raise AssertionError("Enabled listener did not start")
+for attempt in range(40):
+    try:
+        if request("http://127.0.0.1:4000/v1/mcp/server")[0] == 200:
+            break
+    except (urllib.error.URLError, TimeoutError):
+        time.sleep(1)
+else:
+    raise AssertionError("Runner fixture did not become ready")
 if web:
     assert request("http://127.0.0.1:8080/healthz")[0] == 200
     assert request("http://127.0.0.1:8080/api/me")[0] == 401
     assert request("http://127.0.0.1:8080/api/me", os.environ["USER_SWITCHER_BEARER"])[0] == 200
+    key = os.environ["USER_SWITCHER_BEARER"]
+    status, content = request("http://127.0.0.1:8080/api/state", key)
+    assert status == 200, content
+    state = json.loads(content)
+    if len(sys.argv) > 1 and sys.argv[1] == "restart":
+        assert any(p["name"] == "CI smoke project" for p in state["projects"]), state
+    else:
+        status, content = request("http://127.0.0.1:8080/api/projects", key,
+            {"name": "CI smoke project", "selection": {"servers": {"fixture": None}}})
+        assert status == 201, content
+    status, content = request("http://127.0.0.1:8080/api/apply", key,
+        {"selection": {"servers": {}}, "revision": state["revision"]})
+    assert status == 200 and json.loads(content)["active"]["servers"] == {}, content
 if mcp:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     assert request("http://127.0.0.1:8000/mcp", "unknown", payload)[0] == 401
@@ -47,4 +69,7 @@ if mcp:
     assert status == 200 and 'current_state' in content and 'admin_set_access' not in content
     status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_ADMIN_VIRTUAL_KEY"], payload)
     assert status == 200 and 'admin_set_access' in content and 'apply_selection' not in content
+    status, content = request("http://127.0.0.1:8000/mcp", os.environ["USER_SWITCHER_BEARER"],
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "current_state", "arguments": {}}})
+    assert status == 200 and 'ci-user' in content and '"isError":true' not in content.replace(' ', '')
 print("Candidate listeners and MCP role separation passed")

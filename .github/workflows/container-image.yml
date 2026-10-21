@@ -147,21 +147,18 @@ jobs:
               -e USER_NAME=ci-user \
               -e USER_SWITCHER_BEARER=ci-switcher-00000000000000000000000000000000 \
               -e USER_LITELLM_BEARER=ci-litellm-00000000000000000000000000000000 \
+              -e LITELLM_API_BASE_URL=http://127.0.0.1:4000 \
               -e WEBUI_ENABLED="$web" -e MCP_ENABLED="$mcp" "mcp-switcher-candidate:${GITHUB_SHA}")
             docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
+            docker cp .github/scripts/fake_upstream.py "$container:/tmp/fake_upstream.py"
+            docker exec -d "$container" python3 /tmp/fake_upstream.py
             # docker cp cannot write a read-only root; /tmp is a dedicated writable tmpfs.
             docker exec "$container" python3 /tmp/smoke.py
-            docker exec -i "$container" python3 - <<'PY'
-          import sqlite3
-          c=sqlite3.connect('/opt/f24sales/litellm-mcp-switcher/sqlite/switcher.sqlite3')
-          c.execute('CREATE TABLE IF NOT EXISTS smoke_persistence (value TEXT)')
-          c.execute('INSERT INTO smoke_persistence VALUES (?)', ('survives',))
-          c.commit()
-          PY
             docker restart "$container" >/dev/null
             docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
-            docker exec "$container" python3 /tmp/smoke.py
-            docker exec "$container" python3 -c "import sqlite3; c=sqlite3.connect('/opt/f24sales/litellm-mcp-switcher/sqlite/switcher.sqlite3'); assert c.execute('SELECT COUNT(*) FROM smoke_persistence').fetchone()[0]>0"
+            docker cp .github/scripts/fake_upstream.py "$container:/tmp/fake_upstream.py"
+            docker exec -d "$container" python3 /tmp/fake_upstream.py
+            docker exec "$container" python3 /tmp/smoke.py restart
             docker stop --time 20 "$container" >/dev/null
             [ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ]
             docker rm "$container" >/dev/null; container=""
