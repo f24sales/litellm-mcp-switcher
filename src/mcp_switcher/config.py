@@ -20,7 +20,7 @@ class Identity:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore", env_ignore_empty=True)
     litellm_admin_virtual_key: SecretStr
     litellm_api_base_url: str = "http://litellm:4000"
     litellm_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
