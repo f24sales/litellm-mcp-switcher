@@ -88,6 +88,8 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
         names.add(name)
         keys.add(key)
         users.append(Identity(name, bearer, key))
+    if any(u.bearer in keys for u in users if not u.admin):
+        raise ValueError("Switcher and LiteLLM bearer namespaces must be separate")
     if len(users) == 1:
         raise ValueError("Configure at least one user")
     return settings, users

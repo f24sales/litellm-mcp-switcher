@@ -53,3 +53,13 @@ def test_both_listeners_disabled_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("MCP_ENABLED", "0")
     with pytest.raises(ValueError):
         load_configuration()
+
+
+
+def test_cross_user_bearer_role_collision_is_rejected(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("USER_NAME_02", "bob")
+    monkeypatch.setenv("USER_SWITCHER_BEARER_02", "litellm-" + "l" * 40)
+    monkeypatch.setenv("USER_LITELLM_BEARER_02", "bob-litellm-" + "l" * 40)
+    with pytest.raises(ValueError, match="namespaces"):
+        load_configuration()
