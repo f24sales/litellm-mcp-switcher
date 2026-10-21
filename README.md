@@ -178,7 +178,7 @@ Versioned tags use `YYYY.M.N` and are immutable; increment `project.version` aft
 
 `deploy/` contains a core-network Quadlet, SQLite volume and Caddy example. The host publication port remains installation-specific. Prefer Caddy-to-container routing over publishing database or backend ports.
 
-Validate Caddy before reloading. Route `/mcp` to port 8000 and other paths to port 8080. Keep authentication enabled in the application. Preserve existing Caddy imports and register the frontend through the installation's normal Citadel scan.
+Validate Caddy before reloading. The example uses separate HTTPS frontends: port 2012 forwards Web UI and REST to internal port 8080; port 2013 forwards MCP to internal port 8000, with its endpoint at `/mcp`. The MCP frontend's root is a small discovery page, marked so Citadel does not classify it as a second Web UI. Neither internal application port needs host publication. Keep authentication enabled in the application. Preserve existing Caddy imports and register both frontends through the installation's normal Citadel scan.
 
 Image builds, dependency tests, database tests and restart tests run only on GitHub-hosted Actions runners. Local infrastructure pulls exclusively through the installation's Smart1 `images.json` inventory and `sudo ./podman-smart1.sh --update`; no implicit pulls on starts. The deployment Quadlet uses `Pull=never`.
 

@@ -1,9 +1,18 @@
-# Example HTTPS frontend. Match your installation's existing port allocation.
+# Separate HTTPS frontends. Both use the existing container network.
+https://your-host.example:2012 {
+    reverse_proxy litellm-mcp-switcher:8080
+}
+
 https://your-host.example:2013 {
-    handle /mcp* {
-        reverse_proxy litellm-mcp-switcher:8000
+    @discovery {
+        method GET HEAD
+        path /
+    }
+    handle @discovery {
+        header Content-Type "text/html; charset=utf-8"
+        respond "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='citadel-page-role' content='mcp-discovery'><title>MCP SWITCHER MCP</title></head><body><h1>MCP SWITCHER MCP</h1><p>Connect your MCP client to the /mcp endpoint on this HTTPS port. Authenticate with your Switcher bearer.</p></body></html>" 200
     }
     handle {
-        reverse_proxy litellm-mcp-switcher:8080
+        reverse_proxy litellm-mcp-switcher:8000
     }
 }
