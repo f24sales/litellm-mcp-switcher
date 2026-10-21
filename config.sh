@@ -1,0 +1,2932 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SQLITE_PERSISTENCE="$SCRIPT_DIR/sqlite_persistence.sh"
+OPTIONAL_PERSISTENCE="$SCRIPT_DIR/optional_persistence.sh"
+
+directory_has_config_examples() {
+    local directory="$1"
+    local env_example stem
+
+    if [ -f "$directory/env.example" ] || \
+       [ -f "$directory/config.conf_example" ] || \
+       [ -f "$directory/container.example" ]; then
+        return 0
+    fi
+    for env_example in "$directory"/fedora[0-9]*-ai-*.env_example; do
+        [ -f "$env_example" ] || continue
+        [[ "$env_example" == *-additional.env_example ]] && continue
+        stem="${env_example%.env_example}"
+        if [ -f "$stem.config.conf_example" ] && [ -f "$stem.container_example" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if directory_has_config_examples "$SCRIPT_DIR"; then
+    DIR="$SCRIPT_DIR"
+else
+    DIR="$(pwd)"
+fi
+
+PROJECT_NAME="$(basename "$DIR")"
+CONTAINER_NAME="${PROJECT_NAME,,}"
+ENV_FILE="$DIR/.env"
+CONFIG_FILE="$DIR/config.conf"
+CONTAINER_FILE="$DIR/container.conf"
+BUILD_FILE="$DIR/build.conf"
+CONTAINER_NAME_MODE=false
+CONFIG_SHOW=""
+NO_CONTAINER=false
+RENDER_CONTAINER_ONLY=false
+
+ENV_EXAMPLE=""
+CONFIG_EXAMPLE=""
+CONTAINER_EXAMPLE=""
+FEDORA_CUMULATIVE_EXAMPLES=false
+
+select_config_examples() {
+    local directory="$1"
+    local env_example stem
+    local -a fedora_stems=()
+
+    for env_example in "$directory"/fedora[0-9]*-ai-*.env_example; do
+        [ -f "$env_example" ] || continue
+        [[ "$env_example" == *-additional.env_example ]] && continue
+        stem="${env_example%.env_example}"
+        [ -f "$stem.config.conf_example" ] || continue
+        [ -f "$stem.container_example" ] || continue
+        fedora_stems+=("$stem")
+    done
+
+    if [ "${#fedora_stems[@]}" -gt 1 ]; then
+        echo "Multiple cumulative Fedora example triples found in $directory" >&2
+        printf '  %s\n' "${fedora_stems[@]##*/}" >&2
+        return 1
+    fi
+    if [ "${#fedora_stems[@]}" -eq 1 ]; then
+        FEDORA_CUMULATIVE_EXAMPLES=true
+        ENV_EXAMPLE="${fedora_stems[0]}.env_example"
+        CONFIG_EXAMPLE="${fedora_stems[0]}.config.conf_example"
+        CONTAINER_EXAMPLE="${fedora_stems[0]}.container_example"
+        return 0
+    fi
+
+    [ -f "$directory/env.example" ] && ENV_EXAMPLE="$directory/env.example"
+    [ -f "$directory/config.conf_example" ] && CONFIG_EXAMPLE="$directory/config.conf_example"
+    [ -f "$directory/container.example" ] && CONTAINER_EXAMPLE="$directory/container.example"
+    [ -n "$ENV_EXAMPLE$CONFIG_EXAMPLE$CONTAINER_EXAMPLE" ]
+}
+
+select_config_examples "$DIR" || {
+    echo "No cumulative Fedora example triple or generic example files found in $DIR" >&2
+    exit 1
+}
+
+config_example_files() {
+    [ -z "$ENV_EXAMPLE" ] || printf '%s\n' "$ENV_EXAMPLE"
+    [ -z "$CONFIG_EXAMPLE" ] || printf '%s\n' "$CONFIG_EXAMPLE"
+    [ -z "$CONTAINER_EXAMPLE" ] || printf '%s\n' "$CONTAINER_EXAMPLE"
+}
+
+declare -A REPEAT_GROUP_MODES=()
+declare -A REPEAT_GROUP_INDEXES=()
+declare -A TELEGRAM_CHAT_HANDLED=()
+declare -A DB_AUTO_MIGRATION_CONFLICTS=()
+DB_AUTO_SELECTED_VALUE=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --show) CONFIG_SHOW="--show" ;;
+        --no-container) NO_CONTAINER=true ;;
+        --render-container) RENDER_CONTAINER_ONLY=true ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
+
+trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+valid_ipv4() {
+    python3 - "$1" <<'PY' >/dev/null 2>&1
+import ipaddress
+import sys
+
+ipaddress.IPv4Address(sys.argv[1])
+PY
+}
+
+podman_hosts_file_ip() {
+    local hosts_file="$1"
+
+    [ -r "$hosts_file" ] || return 1
+    awk '
+        {
+            for (field = 2; field <= NF; field++) {
+                if ($field == "host.containers.internal") {
+                    print $1
+                    exit
+                }
+            }
+        }
+    ' "$hosts_file"
+}
+
+discover_podman_host_internal_ip() {
+    local configured="${PODMAN_HOST_INTERNAL_IP:-}"
+    local image="${PODMAN_HOST_INTERNAL_IMAGE:-}"
+    local container_id hosts_file candidate
+
+    if [ -n "$configured" ]; then
+        valid_ipv4 "$configured" || {
+            echo "Invalid PODMAN_HOST_INTERNAL_IP: $configured" >&2
+            return 2
+        }
+        printf '%s\n' "$configured"
+        return 0
+    fi
+
+    if command -v podman >/dev/null 2>&1; then
+        while IFS= read -r container_id; do
+            [ -n "$container_id" ] || continue
+            hosts_file="$(podman inspect --format '{{.HostsPath}}' "$container_id" 2>/dev/null || true)"
+            candidate="$(podman_hosts_file_ip "$hosts_file" 2>/dev/null || true)"
+            if [ -n "$candidate" ] && valid_ipv4 "$candidate"; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done < <(podman ps --quiet 2>/dev/null || true)
+
+        if [ -n "$image" ] && podman image exists "$image" >/dev/null 2>&1; then
+            candidate="$(
+                {
+                    podman run --rm \
+                        --network=pasta \
+                        --entrypoint /usr/bin/getent \
+                        "$image" ahostsv4 host.containers.internal 2>/dev/null ||
+                        true
+                } |
+                    awk 'NR == 1 { print $1 }'
+            )"
+            if [ -n "$candidate" ] && valid_ipv4 "$candidate"; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        fi
+    fi
+
+    # Podman 5.x uses this address for Pasta if no explicit override exists.
+    printf '%s\n' '169.254.1.2'
+}
+
+configure_container_name() {
+    local example default_name="" value="${CONFIG_CONTAINER_NAME:-}"
+
+    while IFS= read -r example || [ -n "$example" ]; do
+        [ -f "$example" ] || continue
+        grep -qx '#CONTAINER-NAME' "$example" || continue
+        default_name="$(awk '
+            $0 == "#CONTAINER-NAME" { active = 1; next }
+            active && $0 ~ /^CONTAINER_NAME=/ { sub(/^[^=]*=/, ""); print; exit }
+        ' "$example")"
+        break
+    done < <(config_example_files)
+    [ -n "$default_name" ] || return 0
+    CONTAINER_NAME_MODE=true
+
+    if [ -z "$value" ]; then
+        if [ -t 0 ]; then
+            read -rp "  Container name [$default_name]: " value
+        fi
+        value="${value:-$default_name}"
+    fi
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        echo "Invalid container name: $value" >&2
+        exit 2
+    fi
+
+    CONTAINER_NAME="$value"
+    export CONFIG_CONTAINER_NAME="$CONTAINER_NAME"
+    ENV_FILE="$DIR/$CONTAINER_NAME.env"
+    CONFIG_FILE="$DIR/${CONTAINER_NAME}_config.conf"
+    CONTAINER_FILE="$DIR/${CONTAINER_NAME}_container.conf"
+    BUILD_FILE="$DIR/${CONTAINER_NAME}_build.conf"
+}
+
+read_kv_file() {
+    local file="$1"
+    local wanted="$2"
+    local line stripped entry key value
+
+    [ -f "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        stripped="$(trim "$line")"
+        [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+
+        entry="$(trim "$line")"
+        [[ "$entry" == *=* ]] || continue
+
+        key="$(trim "${entry%%=*}")"
+        value="$(trim "${entry#*=}")"
+        if [ "$key" = "$wanted" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done < "$file"
+    return 1
+}
+
+config_value() {
+    local key="$1"
+    local file
+
+    if [ "$NO_CONTAINER" != "true" ]; then
+        read_kv_file "$CONTAINER_FILE" "$key" && return 0
+    fi
+    for file in "$CONFIG_FILE" "$ENV_FILE"; do
+        read_kv_file "$file" "$key" && return 0
+    done
+    if [ "$NO_CONTAINER" != "true" ]; then
+        if [ -n "$CONTAINER_EXAMPLE" ]; then
+            read_kv_file "$CONTAINER_EXAMPLE" "$key" && return 0
+        fi
+    fi
+    for file in "$CONFIG_EXAMPLE" "$ENV_EXAMPLE"; do
+        [ -n "$file" ] || continue
+        read_kv_file "$file" "$key" && return 0
+    done
+    return 1
+}
+
+find_configured_value_elsewhere() {
+    local target="$1"
+    local wanted="$2"
+    local file value
+
+    OTHER_VALUE_FILE=""
+    OTHER_VALUE=""
+    for file in "$CONTAINER_FILE" "$CONFIG_FILE" "$ENV_FILE"; do
+        [ "$file" != "$target" ] || continue
+        if value="$(read_kv_file "$file" "$wanted")"; then
+            OTHER_VALUE_FILE="$file"
+            OTHER_VALUE="$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+provider_names_from_conf() {
+    local provider_file="$1"
+    local section name
+
+    [ -f "$provider_file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(trim "$line")"
+        [[ "$line" =~ ^\[provider\.([^]]+)\]$ ]] || continue
+        name="${BASH_REMATCH[1],,}"
+        printf '%s\n' "$name"
+    done < "$provider_file"
+}
+
+provider_file_for_example() {
+    local example="$1"
+    local key="${2:-}"
+    local base prefix candidate
+
+    base="$(dirname "$example")"
+    if [ -f "$base/provider.conf" ]; then
+        printf '%s\n' "$base/provider.conf"
+        return 0
+    fi
+    if [ -f "$DIR/provider.conf" ]; then
+        printf '%s\n' "$DIR/provider.conf"
+        return 0
+    fi
+    if [ -n "$key" ] && [[ "$key" == *_PROVIDER* ]]; then
+        prefix="${key%%_PROVIDER*}"
+        candidate="$DIR/safrano9999/${prefix,,}-provider.conf"
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        return 1
+    fi
+    for candidate in "$DIR"/safrano9999/*-provider.conf; do
+        [ -f "$candidate" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+provider_prompt() {
+    local example="$1"
+    local key="${2:-}"
+    local provider_file
+    local -a names=()
+    local name index=1
+
+    provider_file="$(provider_file_for_example "$example" "$key" || true)"
+    [ -n "$provider_file" ] || return 0
+    while IFS= read -r name || [ -n "$name" ]; do
+        [ -n "$name" ] || continue
+        names+=("$name")
+    done < <(provider_names_from_conf "$provider_file")
+    [ "${#names[@]}" -gt 0 ] || return 0
+
+    for name in "${names[@]}"; do
+        printf '(%s) %s ' "$index" "$name"
+        index=$((index + 1))
+    done
+}
+
+normalize_provider_value() {
+    local example="$1"
+    local key="$2"
+    local value="$3"
+    local provider_file name index=1
+
+    provider_file="$(provider_file_for_example "$example" "$key" || true)"
+    if [ -n "$provider_file" ] && [[ "$value" =~ ^[0-9]+$ ]]; then
+        while IFS= read -r name || [ -n "$name" ]; do
+            if [ "$index" -eq "$value" ]; then
+                printf '%s\n' "$name"
+                return 0
+            fi
+            index=$((index + 1))
+        done < <(provider_names_from_conf "$provider_file")
+    fi
+    printf '%s\n' "${value,,}"
+}
+
+provider_selector_key() {
+    local key="$1"
+    [[ "$key" =~ (^|_)PROVIDER(_[0-9]+)?$ ]]
+}
+
+normalize_rule_value() {
+    local value="$1"
+    value="$(trim "$value")"
+    value="${value,,}"
+    case "$value" in
+        0|false|no|off) printf 'false\n' ;;
+        1|true|yes|on) printf 'true\n' ;;
+        *) printf '%s\n' "$value" ;;
+    esac
+}
+
+openssl_generator_default() {
+    local value="$1"
+    [[ "$value" =~ ^example:[[:space:]]+openssl[[:space:]]+rand[[:space:]]+-(hex|base64)[[:space:]]+([0-9]+)$ ]]
+}
+
+openssl_generator_label() {
+    local value="$1"
+    value="$(trim "${value#example:}")"
+    printf '%s\n' "$value"
+}
+
+run_openssl_generator() {
+    local value="$1"
+    local mode size
+
+    if [[ "$value" =~ ^example:[[:space:]]+openssl[[:space:]]+rand[[:space:]]+-(hex|base64)[[:space:]]+([0-9]+)$ ]]; then
+        mode="${BASH_REMATCH[1]}"
+        size="${BASH_REMATCH[2]}"
+        openssl rand "-$mode" "$size"
+        return 0
+    fi
+    return 1
+}
+
+detect_gui_env_values() {
+    local display="${DISPLAY:-}"
+    local runtime="${XDG_RUNTIME_DIR:-}"
+
+    [ -n "$display" ] || display=":0"
+    [ -n "$runtime" ] || runtime="/run/user/$(id -u 2>/dev/null || printf '0')"
+
+    printf 'DISPLAY=%s\n' "$display"
+    printf 'NO_AT_BRIDGE=1\n'
+    printf 'XDG_RUNTIME_DIR=%s\n' "$runtime"
+}
+
+write_config_value() {
+    local target="$1"
+    local key="$2"
+    local value="$3"
+
+    sed -i "/^${key}=/d" "$target" 2>/dev/null || true
+    echo "$key=$value" >> "$target"
+}
+
+normalize_db_backend_value() {
+    local value
+
+    value="$(normalize_rule_value "$1")"
+    case "$value" in
+        postgres|postgresql|pgsql|psql) printf 'postgres\n' ;;
+        mysql) printf 'mysql\n' ;;
+        mariadb) printf 'mariadb\n' ;;
+        sqlite|sqlite3) printf 'sqlite\n' ;;
+        *) printf '%s\n' "$value" ;;
+    esac
+}
+
+db_auto_contract_declared() {
+    [ -n "$ENV_EXAMPLE" ] || return 1
+    read_kv_file "$ENV_EXAMPLE" DB_AUTO >/dev/null
+}
+
+db_auto_enabled_value() {
+    local value
+
+    value="$DB_AUTO_SELECTED_VALUE"
+    if [ -z "$value" ]; then
+        value="$(read_kv_file "$ENV_FILE" DB_AUTO 2>/dev/null || \
+            read_kv_file "$ENV_EXAMPLE" DB_AUTO 2>/dev/null || true)"
+    fi
+    [ "$value" = "1" ]
+}
+
+declared_db_service_groups() {
+    local line stripped entry key prefix suffix pending_default_preset=""
+    local -A seen=()
+    local -A fields=()
+    local -a order=()
+
+    [ -n "$ENV_EXAMPLE" ] && [ -f "$ENV_EXAMPLE" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        stripped="$(trim "$line")"
+        if [[ "$stripped" == \#default-preset:* ]]; then
+            pending_default_preset="$(trim "${stripped#\#default-preset:}")"
+            continue
+        fi
+        if [ -z "$stripped" ]; then
+            pending_default_preset=""
+            continue
+        fi
+        [[ "$stripped" == \#* ]] && continue
+        entry="$(trim "${line%%#*}")"
+        if [[ "$entry" != *=* ]]; then
+            pending_default_preset=""
+            continue
+        fi
+        key="$(trim "${entry%%=*}")"
+        if [[ ! "$key" =~ ^([A-Za-z_][A-Za-z0-9_]*)_DB_(BACKEND|HOST|URL|PORT|NAME|USER|PW|PASSWORD|PREFIX)$ ]]; then
+            pending_default_preset=""
+            continue
+        fi
+        prefix="${BASH_REMATCH[1]}"
+        suffix="${BASH_REMATCH[2]}"
+        if [[ -z "${seen[$prefix]+x}" ]]; then
+            seen[$prefix]=1
+            order+=("$prefix")
+        fi
+        fields["$prefix:$suffix"]=1
+        if [ "$suffix" = "PREFIX" ] && db_value_is_meaningful "$pending_default_preset"; then
+            fields["$prefix:EXPLICIT_PREFIX_PRESET"]=1
+        fi
+        pending_default_preset=""
+    done < "$ENV_EXAMPLE"
+
+    # An auto-managed service must expose every shared connection semantic.
+    # HOST may be named URL and PASSWORD may be named PW by the application.
+    for prefix in "${order[@]}"; do
+        [[ -n "${fields[$prefix:BACKEND]+x}" ]] || continue
+        [[ -n "${fields[$prefix:HOST]+x}" || -n "${fields[$prefix:URL]+x}" ]] || continue
+        [[ -n "${fields[$prefix:PORT]+x}" ]] || continue
+        [[ -n "${fields[$prefix:NAME]+x}" ]] || continue
+        [[ -n "${fields[$prefix:USER]+x}" ]] || continue
+        [[ -n "${fields[$prefix:PW]+x}" || -n "${fields[$prefix:PASSWORD]+x}" ]] || continue
+        [[ -n "${fields[$prefix:EXPLICIT_PREFIX_PRESET]+x}" ]] || continue
+        printf '%s\n' "$prefix"
+    done
+}
+
+declared_db_prefix_preset() {
+    local wanted="$1"
+    local line stripped entry key pending_default_preset=""
+
+    [ -n "$ENV_EXAMPLE" ] && [ -f "$ENV_EXAMPLE" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        stripped="$(trim "$line")"
+        if [[ "$stripped" == \#default-preset:* ]]; then
+            pending_default_preset="$(trim "${stripped#\#default-preset:}")"
+            continue
+        fi
+        if [ -z "$stripped" ]; then
+            pending_default_preset=""
+            continue
+        fi
+        [[ "$stripped" == \#* ]] && continue
+        entry="$(trim "${line%%#*}")"
+        if [[ "$entry" != *=* ]]; then
+            pending_default_preset=""
+            continue
+        fi
+        key="$(trim "${entry%%=*}")"
+        if [ "$key" = "${wanted}_DB_PREFIX" ] && db_value_is_meaningful "$pending_default_preset"; then
+            printf '%s\n' "$pending_default_preset"
+            return 0
+        fi
+        pending_default_preset=""
+    done < "$ENV_EXAMPLE"
+    return 1
+}
+
+declared_db_service_keys() {
+    local wanted="$1"
+    local line stripped entry key
+
+    [ -n "$ENV_EXAMPLE" ] && [ -f "$ENV_EXAMPLE" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        stripped="$(trim "$line")"
+        [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+        entry="$(trim "${line%%#*}")"
+        [[ "$entry" == *=* ]] || continue
+        key="$(trim "${entry%%=*}")"
+        [[ "$key" =~ ^${wanted}_DB_(BACKEND|HOST|URL|PORT|NAME|USER|PW|PASSWORD|PREFIX)$ ]] || continue
+        printf '%s\n' "$key"
+    done < "$ENV_EXAMPLE"
+}
+
+db_auto_service_group_declared() {
+    local wanted="$1"
+    local group
+
+    while IFS= read -r group || [ -n "$group" ]; do
+        [ "$group" = "$wanted" ] && return 0
+    done < <(declared_db_service_groups)
+    return 1
+}
+
+db_value_is_meaningful() {
+    local value
+
+    value="$(trim "$1")"
+    case "${value,,}" in
+        ""|blank|null) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+ensure_db_service_presets() {
+    local group preset_key effective_key value
+
+    db_auto_contract_declared || return 0
+    touch "$ENV_FILE"
+    while IFS= read -r group || [ -n "$group" ]; do
+        [ -n "$group" ] || continue
+        preset_key="${group}_DB_PREFIX_PRESET"
+        grep -q "^${preset_key}=" "$ENV_FILE" 2>/dev/null && continue
+        effective_key="${group}_DB_PREFIX"
+        value="$(read_kv_file "$ENV_FILE" "$effective_key" 2>/dev/null || true)"
+        if ! db_value_is_meaningful "$value"; then
+            value="$(declared_db_prefix_preset "$group" 2>/dev/null || true)"
+        fi
+        write_config_value "$ENV_FILE" "$preset_key" "$value"
+    done < <(declared_db_service_groups)
+}
+
+db_group_values_for_common_key() {
+    local group="$1"
+    local common_key="$2"
+    local service_key value
+    local -a suffixes=()
+
+    case "$common_key" in
+        DB_BACKEND) suffixes=(BACKEND) ;;
+        DB_HOST) suffixes=(HOST URL) ;;
+        DB_PORT) suffixes=(PORT) ;;
+        DB_NAME) suffixes=(NAME) ;;
+        DB_USER) suffixes=(USER) ;;
+        DB_PASSWORD) suffixes=(PW PASSWORD) ;;
+        *) return 0 ;;
+    esac
+    for service_key in "${suffixes[@]}"; do
+        service_key="${group}_DB_${service_key}"
+        value="$(read_kv_file "$ENV_FILE" "$service_key" 2>/dev/null || true)"
+        db_value_is_meaningful "$value" || continue
+        if [ "$common_key" = "DB_BACKEND" ]; then
+            value="$(normalize_db_backend_value "$value")"
+        fi
+        printf '%s\n' "$value"
+    done
+}
+
+seed_common_db_values_from_existing_services() {
+    local intended_auto="$1"
+    local common_key group value
+    local -A values=()
+
+    [ -f "$ENV_FILE" ] || return 0
+    for common_key in DB_BACKEND DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD; do
+        value="$(read_kv_file "$ENV_FILE" "$common_key" 2>/dev/null || true)"
+        db_value_is_meaningful "$value" && continue
+        values=()
+        while IFS= read -r group || [ -n "$group" ]; do
+            [ -n "$group" ] || continue
+            while IFS= read -r value || [ -n "$value" ]; do
+                [ -n "$value" ] || continue
+                values["$value"]=1
+            done < <(db_group_values_for_common_key "$group" "$common_key")
+        done < <(declared_db_service_groups)
+        if [ "${#values[@]}" -eq 1 ]; then
+            for value in "${!values[@]}"; do
+                write_config_value "$ENV_FILE" "$common_key" "$value"
+            done
+        elif [ "${#values[@]}" -gt 1 ]; then
+            if [ "$intended_auto" = "1" ]; then
+                echo "DB_AUTO=1 cannot migrate $common_key: existing services differ; set $common_key explicitly or use DB_AUTO=0" >&2
+                return 1
+            fi
+            DB_AUTO_MIGRATION_CONFLICTS[$common_key]=1
+        fi
+    done
+}
+
+prepare_db_auto_migration() {
+    local intended_auto
+
+    db_auto_contract_declared || return 0
+    ensure_db_service_presets
+    # Existing installations without DB_AUTO must first get the chance to
+    # choose 0. Seed only values which are already identical; conflicts are
+    # evaluated after DB_AUTO has actually been selected.
+    seed_common_db_values_from_existing_services 0
+    intended_auto="$(read_kv_file "$ENV_FILE" DB_AUTO 2>/dev/null || true)"
+    case "$intended_auto" in
+        "") return 0 ;;
+        0) return 0 ;;
+        1) seed_common_db_values_from_existing_services "$intended_auto" ;;
+        *) echo "DB_AUTO must be 0 or 1" >&2; return 1 ;;
+    esac
+}
+
+reconcile_db_auto_config() {
+    local auto backend local_backend=false group service_key suffix value
+    local common_host common_port common_name common_user common_password prefix_preset
+    local common_key default
+    local groups=0
+    local auto_was_missing=false
+
+    db_auto_contract_declared || return 0
+    touch "$ENV_FILE"
+    auto="$(read_kv_file "$ENV_FILE" DB_AUTO 2>/dev/null || true)"
+    if [ -z "$auto" ]; then
+        auto_was_missing=true
+        auto="$(read_kv_file "$ENV_EXAMPLE" DB_AUTO 2>/dev/null || true)"
+    fi
+    case "$auto" in
+        0)
+            [ "$auto_was_missing" = "false" ] || write_config_value "$ENV_FILE" DB_AUTO "$auto"
+            for common_key in DB_BACKEND DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD; do
+                write_config_value "$ENV_FILE" "$common_key" "blank"
+            done
+            rewrite_config_with_comments "$ENV_EXAMPLE" "$ENV_FILE"
+            return 0
+            ;;
+        1) ;;
+        *) echo "DB_AUTO must be 0 or 1" >&2; return 1 ;;
+    esac
+
+    ensure_db_service_presets
+    seed_common_db_values_from_existing_services "$auto"
+    if [ "$auto_was_missing" = "true" ]; then
+        write_config_value "$ENV_FILE" DB_AUTO "$auto"
+    fi
+    for common_key in DB_BACKEND DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD; do
+        if ! grep -q "^${common_key}=" "$ENV_FILE" 2>/dev/null; then
+            default="$(read_kv_file "$ENV_EXAMPLE" "$common_key" 2>/dev/null || true)"
+            write_config_value "$ENV_FILE" "$common_key" "$default"
+        fi
+    done
+
+    backend="$(normalize_db_backend_value "$(read_kv_file "$ENV_FILE" DB_BACKEND 2>/dev/null || true)")"
+    db_value_is_meaningful "$backend" || {
+        echo "DB_AUTO=1 requires DB_BACKEND" >&2
+        return 1
+    }
+    write_config_value "$ENV_FILE" DB_BACKEND "$backend"
+    common_host="$(read_kv_file "$ENV_FILE" DB_HOST 2>/dev/null || true)"
+    common_port="$(read_kv_file "$ENV_FILE" DB_PORT 2>/dev/null || true)"
+    common_name="$(read_kv_file "$ENV_FILE" DB_NAME 2>/dev/null || true)"
+    common_user="$(read_kv_file "$ENV_FILE" DB_USER 2>/dev/null || true)"
+    common_password="$(read_kv_file "$ENV_FILE" DB_PASSWORD 2>/dev/null || true)"
+    case "$backend" in
+        sqlite|file|on_the_fly) local_backend=true ;;
+    esac
+    if [ "$local_backend" = "false" ]; then
+        for common_key in DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD; do
+            value="$(read_kv_file "$ENV_FILE" "$common_key" 2>/dev/null || true)"
+            db_value_is_meaningful "$value" || {
+                echo "DB_AUTO=1 with DB_BACKEND=$backend requires $common_key" >&2
+                return 1
+            }
+        done
+    fi
+
+    while IFS= read -r group || [ -n "$group" ]; do
+        [ -n "$group" ] || continue
+        groups=$((groups + 1))
+        prefix_preset="$(read_kv_file "$ENV_FILE" "${group}_DB_PREFIX_PRESET" 2>/dev/null || true)"
+        while IFS= read -r service_key || [ -n "$service_key" ]; do
+            [ -n "$service_key" ] || continue
+            suffix="${service_key#${group}_DB_}"
+            if [ "$suffix" = "BACKEND" ]; then
+                value="$backend"
+            elif [ "$local_backend" = "true" ]; then
+                value="blank"
+            else
+                case "$suffix" in
+                    HOST|URL) value="$common_host" ;;
+                    PORT) value="$common_port" ;;
+                    NAME) value="$common_name" ;;
+                    USER) value="$common_user" ;;
+                    PW|PASSWORD) value="$common_password" ;;
+                    PREFIX) value="$prefix_preset" ;;
+                    *) continue ;;
+                esac
+            fi
+            write_config_value "$ENV_FILE" "$service_key" "$value"
+        done < <(declared_db_service_keys "$group")
+    done < <(declared_db_service_groups)
+    rewrite_config_with_comments "$ENV_EXAMPLE" "$ENV_FILE"
+    echo "    DB_AUTO=1 reconciled $groups database service groups"
+}
+
+discover_telegram_chat_id() {
+    local token="$1"
+
+    command -v python3 >/dev/null || {
+        echo "    Telegram discovery requires python3" >&2
+        return 1
+    }
+    TELEGRAM_DISCOVERY_TOKEN="$token" python3 - <<'PY'
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+token = os.environ["TELEGRAM_DISCOVERY_TOKEN"]
+base_url = os.environ.get("TELEGRAM_BOT_API_BASE", "https://api.telegram.org").rstrip("/")
+try:
+    discovery_timeout = max(1, int(os.environ.get("TELEGRAM_DISCOVERY_TIMEOUT_SECONDS", "120")))
+except ValueError:
+    print("    TELEGRAM_DISCOVERY_TIMEOUT_SECONDS must be an integer", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def telegram(method, values=None):
+    encoded = urllib.parse.urlencode(values or {}).encode()
+    url = f"{base_url}/bot{urllib.parse.quote(token, safe=':')}/{method}"
+    request = urllib.request.Request(url, data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            failure = json.load(error)
+            description = failure.get("description") if isinstance(failure, dict) else None
+        except (OSError, ValueError):
+            description = None
+        raise RuntimeError(description or f"Telegram API returned HTTP {error.code}") from error
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Telegram request failed ({type(error).__name__})") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Telegram API returned an invalid response")
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("description") or "Telegram API rejected the request")
+    return payload.get("result")
+
+
+try:
+    identity = telegram("getMe")
+    username = identity.get("username") if isinstance(identity, dict) else None
+    old_updates = telegram("getUpdates", {"timeout": 0, "allowed_updates": '["message"]'})
+    offset = 0
+    if isinstance(old_updates, list) and old_updates:
+        offset = max(int(update.get("update_id", 0)) for update in old_updates) + 1
+
+    destination = f"@{username}" if username else "the Telegram bot"
+    print(f"    Send /start to {destination}; waiting up to {discovery_timeout}s ...", file=sys.stderr)
+    deadline = time.monotonic() + discovery_timeout
+    while time.monotonic() < deadline:
+        remaining = max(1, int(deadline - time.monotonic()))
+        updates = telegram(
+            "getUpdates",
+            {
+                "offset": offset,
+                "timeout": min(20, remaining),
+                "allowed_updates": '["message"]',
+            },
+        )
+        if not isinstance(updates, list):
+            continue
+        for update in updates:
+            offset = max(offset, int(update.get("update_id", 0)) + 1)
+            message = update.get("message") or {}
+            command = str(message.get("text") or "").split(maxsplit=1)[0].split("@", 1)[0]
+            chat = message.get("chat") or {}
+            if command == "/start" and chat.get("id") is not None:
+                print(chat["id"])
+                raise SystemExit(0)
+except (RuntimeError, TypeError, ValueError) as error:
+    print(f"    Telegram discovery failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+print("    Telegram discovery timed out", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+write_config_value_if_missing() {
+    local target="$1"
+    local key="$2"
+    local value="$3"
+    local existing_line existing
+
+    existing_line="$(grep "^${key}=" "$target" 2>/dev/null | head -1 || true)"
+    existing="${existing_line#*=}"
+    if [ -n "$existing_line" ] && [ -n "$existing" ]; then
+        echo "    $key= exists"
+        return 0
+    fi
+    write_config_value "$target" "$key" "$value"
+    echo "    $key=$value"
+}
+
+project_publish_port() {
+    local value="$1"
+    local container_nr="$2"
+    local first second projected_first projected_second
+
+    if [[ "$value" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        first="${BASH_REMATCH[1]}"
+        second="${BASH_REMATCH[2]}"
+    elif [[ "$value" =~ ^[0-9]+$ ]]; then
+        first="$value"
+        second=""
+    else
+        echo "Invalid publish-port preset: $value" >&2
+        return 1
+    fi
+    if [ "$first" -lt 1 ] || [ "$first" -ge 20000 ] || \
+       { [ -n "$second" ] && { [ "$second" -lt "$first" ] || [ "$second" -ge 20000 ]; }; }; then
+        echo "Publish-port preset must be within 1-19999: $value" >&2
+        return 1
+    fi
+    projected_first=$((container_nr * 10000 + first % 10000))
+    [ "$projected_first" -le 65535 ] || { echo "Projected port exceeds 65535: $projected_first" >&2; return 1; }
+    if [ -z "$second" ]; then
+        printf '%s\n' "$projected_first"
+        return 0
+    fi
+    projected_second=$((container_nr * 10000 + second % 10000))
+    [ "$projected_second" -le 65535 ] || { echo "Projected port exceeds 65535: $projected_second" >&2; return 1; }
+    printf '%s-%s\n' "$projected_first" "$projected_second"
+}
+
+missing_publish_port_count() {
+    local example="$1"
+    local target="$2"
+    local key value count=0
+
+    while IFS= read -r key; do
+        value="$(read_kv_file "$target" "$key" || true)"
+        [ -n "$value" ] || count=$((count + 1))
+    done < <(awk -F= '
+        /^[[:space:]]*#/ { next }
+        $1 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*_PUBLISH_PORT[[:space:]]*$/ {
+            key=$1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (!seen[key]++) print key
+        }
+    ' "$example")
+    printf '%s\n' "$count"
+}
+
+add_unique() {
+    local value="$1"
+    shift
+    local -n target="$1"
+    local existing
+
+    [ -n "$value" ] || return 0
+    for existing in "${target[@]}"; do
+        [ "$existing" = "$value" ] && return 0
+    done
+    target+=("$value")
+}
+
+normalize_volume_item() {
+    local item="$1"
+    local source rest normalized_source
+
+    if [[ "$item" != *:* ]]; then
+        printf '%s\n' "$item"
+        return 0
+    fi
+
+    source="${item%%:*}"
+    rest="${item#*:}"
+    normalized_source="$source"
+    if [[ "$source" == "." || "$source" == ./* || "$source" == ../* || ( "$source" != /* && "$source" != %h && "$source" != %h/* && "$source" == */* ) ]]; then
+        normalized_source="$(cd "$DIR" && realpath -m -- "$source")"
+    fi
+    printf '%s:%s\n' "$normalized_source" "$rest"
+}
+
+expand_volume_value() {
+    local context_key="$1"
+    local value="$2"
+    local chain="${3:-}"
+    local token key replacement next_chain
+
+    # Container volume examples may reference another configuration value with
+    # the deliberately small ${KEY} syntax.  Do not use eval/envsubst here:
+    # both would also interpret shell syntax and ambient process variables.
+    while [[ "$value" =~ (\$\{[^\}]*\}) ]]; do
+        token="${BASH_REMATCH[1]}"
+        key="${token:2:${#token}-3}"
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Unsafe variable reference in $context_key: $token" >&2
+            return 1
+        fi
+        if [[ "|$chain|" == *"|$key|"* ]]; then
+            echo "Cyclic variable reference in $context_key: ${chain//|/ -> } -> $key" >&2
+            return 1
+        fi
+        if ! replacement="$(config_value "$key")"; then
+            echo "Missing variable referenced by $context_key: $key" >&2
+            return 1
+        fi
+        case "${replacement,,}" in
+            ""|blank|null)
+                echo "Empty variable referenced by $context_key: $key" >&2
+                return 1
+                ;;
+        esac
+        next_chain="${chain:+$chain|}$key"
+        replacement="$(expand_volume_value "$context_key" "$replacement" "$next_chain")" || return 1
+        value="${value/"$token"/"$replacement"}"
+    done
+
+    # This is a Quadlet/Compose volume value, not a shell expression.  Keep a
+    # conservative character set that covers names, POSIX paths, mappings and
+    # mount options while rejecting command syntax, whitespace and newlines.
+    if [[ "$value" == *'$'* ]] || [[ ! "$value" =~ ^[A-Za-z0-9._/@:+,=%-]*$ ]]; then
+        echo "Unsafe value in $context_key: $value" >&2
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+add_repo_bind_mount() {
+    local rel="$1"
+    local target_override="${2:-}"
+    local source target relative
+
+    rel="$(trim "$rel")"
+    [ -n "$rel" ] || return 0
+    [[ "$rel" != *:* && "$rel" != *$'\n'* && "$rel" != *$'\r'* ]] || {
+        echo "Invalid bind source: $rel" >&2
+        return 1
+    }
+    if [[ "$rel" == %config-conf/* ]]; then
+        rel="${rel#%config-conf/}"
+    elif [[ "$rel" == %config-conf* ]]; then
+        echo "Invalid %config-conf path: $rel" >&2
+        return 1
+    fi
+    if [[ "$rel" == /* ]]; then
+        # Absolute host paths require an explicit container mount target.
+        [ -n "$target_override" ] || return 0
+        source="$(realpath -m -- "$rel")"
+    else
+        [[ "$rel" == ../* ]] && return 0
+        rel="${rel#./}"
+        [ -n "$rel" ] || return 0
+        source="$(cd "$DIR" && realpath -m -- "$rel")"
+        relative="$(realpath -m --relative-to="$DIR" "$source")"
+        [[ "$relative" != .. && "$relative" != ../* ]] || {
+            echo "Bind source escapes the configuration directory: $rel" >&2
+            return 1
+        }
+    fi
+    mkdir -p "$source"
+    if [ -n "$target_override" ]; then
+        [[ "$target_override" == /* && "$target_override" != / && "$target_override" != *:* ]] || {
+            echo "Invalid container bind target: $target_override" >&2
+            return 1
+        }
+        target="$target_override"
+    else
+        target="/opt/safrano9999/$PROJECT_NAME/$rel"
+    fi
+    add_unique "${source}:${target}:Z" volumes
+}
+
+add_readonly_shared_bind_mount() {
+    local configured="$1"
+    local target="$2"
+    local source
+
+    configured="$(trim "$configured")"
+    case "${configured,,}" in
+        ""|blank|null) return 0 ;;
+    esac
+    if [[ "$configured" == %config-conf/* ]]; then
+        source="$(realpath -m -- "$DIR/${configured#%config-conf/}")"
+        [[ "$source" == "$(realpath -e -- "$DIR")/"* ]] || {
+            echo "Shared bind source escapes the configuration directory" >&2
+            return 1
+        }
+        mkdir -p -m 0700 -- "$source"
+        configured="$source"
+    fi
+    [[ "$configured" == /* && "$configured" != *:* \
+        && "$configured" != *[[:space:]]* \
+        && "$configured" != *$'\n'* && "$configured" != *$'\r'* ]] || {
+        echo "Shared bind source must be an absolute path: $configured" >&2
+        return 1
+    }
+    [[ "$target" == /* && "$target" != / && "$target" != *:* ]] || {
+        echo "Invalid shared bind target: $target" >&2
+        return 1
+    }
+    source="$(realpath -e -- "$configured")" || {
+        echo "Shared bind source does not exist: $configured" >&2
+        return 1
+    }
+    [ -d "$source" ] || {
+        echo "Shared bind source is not a directory: $configured" >&2
+        return 1
+    }
+    add_unique "${source}:${target}:ro,z" volumes
+}
+
+add_repo_file_bind_mount() {
+    local rel="$1"
+    local source target
+
+    rel="$(trim "$rel")"
+    [ -n "$rel" ] || return 0
+    [[ "$rel" == /* || "$rel" == ../* || "$rel" == */* ]] && return 0
+
+    source="$(cd "$DIR" && realpath -m -- "$rel")"
+    touch "$source"
+    target="/opt/safrano9999/$PROJECT_NAME/$rel"
+    add_unique "${source}:${target}:Z" volumes
+}
+
+add_repo_sot_file_mounts() {
+    local line entry
+
+    [ -f "$DIR/.gitignore" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        entry="$(trim "${line%%#*}")"
+        [[ "$entry" == *_SOT.md ]] || continue
+        add_repo_file_bind_mount "$entry"
+    done < "$DIR/.gitignore"
+}
+
+initialize_sqlite_persistence() {
+    $FEDORA_CUMULATIVE_EXAMPLES && return 0
+    [ -x "$SQLITE_PERSISTENCE" ] || return 0
+    if find -H "$DIR/safrano9999" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | grep -q .; then
+        "$SQLITE_PERSISTENCE" init --repo-root "$DIR/safrano9999" --config-dir "$DIR"
+    else
+        "$SQLITE_PERSISTENCE" init --repo "$DIR" --config-dir "$DIR"
+    fi
+}
+
+add_sqlite_volume_mounts() {
+    local item source
+    $FEDORA_CUMULATIVE_EXAMPLES && return 0
+    [ -x "$SQLITE_PERSISTENCE" ] || return 0
+
+    if find -H "$DIR/safrano9999" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | grep -q .; then
+        while IFS= read -r item || [ -n "$item" ]; do
+            [ -n "$item" ] || continue
+            source="${item%%:*}"
+            add_unique "$item" volumes
+            add_unique "$source" named_volumes
+        done < <("$SQLITE_PERSISTENCE" mounts --repo-root "$DIR/safrano9999" --config-dir "$DIR" --container "$CONTAINER_NAME")
+    elif find -H "$DIR/safrano9999" -maxdepth 1 -type f -name '*-latest.zip' -print -quit 2>/dev/null | grep -q .; then
+        while IFS= read -r item || [ -n "$item" ]; do
+            [ -n "$item" ] || continue
+            source="${item%%:*}"
+            add_unique "$item" volumes
+            add_unique "$source" named_volumes
+        done < <("$SQLITE_PERSISTENCE" mounts --zip-root "$DIR/safrano9999" --config-dir "$DIR" --container "$CONTAINER_NAME")
+    else
+        while IFS= read -r item || [ -n "$item" ]; do
+            [ -n "$item" ] || continue
+            source="${item%%:*}"
+            add_unique "$item" volumes
+            add_unique "$source" named_volumes
+        done < <("$SQLITE_PERSISTENCE" mounts --repo "$DIR" --config-dir "$DIR" --container "$CONTAINER_NAME")
+    fi
+}
+
+add_optional_persistence_mounts() {
+    local item source key path destination existing mounted explicit
+    [ -x "$OPTIONAL_PERSISTENCE" ] || return 0
+    while IFS= read -r item || [ -n "$item" ]; do
+        [ -n "$item" ] || continue
+        # An explicit mount selects an existing state volume; do not shadow it
+        # with the automatically named default at the same destination.
+        destination="${item#*:}"; destination="${destination%%:*}"
+        explicit=false
+        for existing in "${volumes[@]}"; do
+            mounted="${existing#*:}"; mounted="${mounted%%:*}"
+            if [[ "$mounted" == "$destination" ]]; then explicit=true; break; fi
+        done
+        $explicit && continue
+        source="${item%%:*}"
+        add_unique "$item" volumes
+        add_unique "$source" named_volumes
+    done < <("$OPTIONAL_PERSISTENCE" mounts --config-dir "$DIR" --container "$CONTAINER_NAME")
+    while IFS=$'\t' read -r key path; do
+        add_unique "$key=$path" persistent_envs
+    done < <("$OPTIONAL_PERSISTENCE" entries --config-dir "$DIR")
+}
+
+rewrite_config_with_comments() {
+    local example="$1"
+    local target="$2"
+    local tmp
+
+    [ -f "$example" ] || return 0
+    [ -f "$target" ] || return 0
+
+    tmp="$(mktemp)"
+    awk -v target="$target" '
+    function trim(s) {
+        sub(/^[[:space:]]+/, "", s)
+        sub(/[[:space:]]+$/, "", s)
+        return s
+    }
+    function parse_env(line, parsed, allow_commented,    entry) {
+        entry = line
+        parsed["commented"] = 0
+        sub(/^[[:space:]]+/, "", entry)
+        if (allow_commented && substr(entry, 1, 1) == "#") {
+            entry = substr(entry, 2)
+            parsed["commented"] = 1
+        } else if (substr(entry, 1, 1) == "#") {
+            return 0
+        }
+        entry = trim(entry)
+        if (entry !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) return 0
+        parsed["key"] = entry
+        sub(/[[:space:]]*=.*/, "", parsed["key"])
+        parsed["key"] = trim(parsed["key"])
+        parsed["value"] = entry
+        sub(/^[^=]*=/, "", parsed["value"])
+        parsed["value"] = trim(parsed["value"])
+        return 1
+    }
+    BEGIN {
+        while ((getline line < target) > 0) {
+            delete parsed
+            if (parse_env(line, parsed, 0)) {
+                if (!(parsed["key"] in current)) order[++order_count] = parsed["key"]
+                current[parsed["key"]] = parsed["value"]
+            }
+        }
+        close(target)
+    }
+    {
+        raw = $0
+        stripped = trim(raw)
+        if (stripped == "") {
+            pending[++pending_count] = raw
+            next
+        }
+        delete parsed
+        if (parse_env(raw, parsed, 1)) {
+            key = parsed["key"]
+            value = (key in current) ? current[key] : parsed["value"]
+            for (i = 1; i <= pending_count; i++) print pending[i]
+            if (parsed["commented"] && !(key in current)) {
+                print "# " key "=" value
+            } else {
+                print key "=" value
+                written[key] = 1
+            }
+            pending_count = 0
+            next
+        }
+        if (substr(stripped, 1, 1) == "#") {
+            comment = trim(substr(stripped, 2))
+            pending[++pending_count] = raw
+            next
+        }
+        pending_count = 0
+    }
+    END {
+        for (i = 1; i <= order_count; i++) {
+            key = order[i]
+            if (key in written) continue
+            if (!printed_extra) {
+                print "# Additional local values"
+                printed_extra = 1
+            }
+            print key "=" current[key]
+        }
+    }' "$example" > "$tmp"
+    mv "$tmp" "$target"
+}
+
+configure_from_example() {
+    local example="$1"
+    local target="$2"
+    local label="$3"
+    local other_existing=false
+
+    [ -f "$example" ] || return 0
+
+    echo ""
+    echo "  Configuring $label"
+    echo ""
+
+    touch "$target"
+    declare -A seen_keys=()
+    declare -A blank_if_targets=()
+    declare -A autofill_blank_keys=()
+    declare -A skip_existing_keys=()
+    declare -A externally_owned_keys=()
+    declare -A value_dupe_targets=()
+    declare -A reverse_varname_sources=()
+    declare -A repeat_group_styles=()
+    declare -A repeat_group_fields=()
+    declare -A repeat_key_groups=()
+    declare -A repeat_optional_complete=()
+    declare -A repeat_freeform=()
+    declare -A repeat_unique=()
+    declare -A repeat_one_true=()
+    declare -A db_defaults=()
+    declare -A db_seen_keys=()
+    local -a db_config_keys=()
+    local -a db_backend_keys=()
+    local -a field_choice_values=()
+    local required_next=false
+    local secret_next=false
+    local directive condition condition_key condition_value target_key target_list secret
+    local repeat_group repeat_style repeat_fields base_key repeat_choice repeat_index repeat_suffix prior_index prior_key prior_value duplicate
+    local pending_value_dupe="" pending_reverse_varname="" value_dupe_target value_dupe_existing value_dupe_choice
+    local pending_choices="" pending_when="" pending_when_not="" pending_default_rules="" pending_telegram_token=""
+    local pending_podman_host_internal=false
+    local field_choices="" field_when="" field_when_not="" field_default_rules="" field_telegram_token=""
+    local field_podman_host_internal=false podman_host_internal_ip=""
+    local telegram_token_key="" telegram_existing=""
+    local generator_label choice
+    local field_choice_count=0 field_choice_index=0 field_choice_total=0
+    local field_choice_default="" field_choice_numbers=""
+    local field_choice_freeform=false field_choice_selected_freeform=false
+    local rule_key db_bulk_eligible=false db_bulk_decided=false db_auto_contract=false
+    local db_auto_pending_write=false
+    local container_nr="" publish_port_count=0 publish_port_choice="" publish_port_autofill=false
+
+    if [ "$target" = "$CONTAINER_FILE" ]; then
+        container_nr="$(read_kv_file "$target" CONTAINER_NR || true)"
+        case "${container_nr^^}" in
+            ""|BLANK|MANUAL) container_nr="" ;;
+            TUN) container_nr="TUN" ;;
+            *)
+                [[ "$container_nr" =~ ^[2-5]$ ]] || {
+                    echo "Invalid CONTAINER_NR=$container_nr; use 2-5, TUN or blank" >&2
+                    return 1
+                }
+                ;;
+        esac
+        if [[ "$container_nr" =~ ^[2-5]$ ]]; then
+            publish_port_count="$(missing_publish_port_count "$example" "$target")"
+            if [ "$publish_port_count" -gt 1 ]; then
+                publish_port_choice="y"
+                if [ -t 0 ]; then
+                    read -r -p "    Auto-set $publish_port_count publish ports for ${container_nr}0-$((container_nr + 1))0? [Y/n]: " publish_port_choice || true
+                    publish_port_choice="${publish_port_choice:-y}"
+                fi
+                case "${publish_port_choice,,}" in
+                    y|yes) publish_port_autofill=true ;;
+                    n|no) ;;
+                    *) echo "    choose y or n" >&2; return 1 ;;
+                esac
+            fi
+        fi
+    fi
+
+    while IFS= read -r line <&7; do
+        stripped="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$stripped" == \#repeat-optional-complete:* ]]; then
+            directive="$(trim "${stripped#\#repeat-optional-complete:}")"
+            for target_key in $directive; do
+                [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                repeat_optional_complete[$target_key]=1
+            done
+            continue
+        fi
+        if [[ "$stripped" == \#repeat-freeform:* ]]; then
+            directive="$(trim "${stripped#\#repeat-freeform:}")"
+            for target_key in $directive; do
+                [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                repeat_freeform[$target_key]=1
+            done
+            continue
+        fi
+        if [[ "$stripped" == \#repeat-unique:* || "$stripped" == \#repeat-one-true:* ]]; then
+            directive="$(trim "${stripped#*:}")"
+            for target_key in $directive; do
+                [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                [[ "$stripped" == \#repeat-unique:* ]] && repeat_unique[$target_key]=1 || repeat_one_true[$target_key]=1
+            done
+            continue
+        fi
+        [[ "$stripped" == \#repeat-group:* ]] || continue
+        directive="$(trim "${stripped#\#repeat-group:}")"
+        read -r repeat_group repeat_style repeat_fields <<< "$directive"
+        [[ "$repeat_group" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        [[ "$repeat_style" == "suffix" || "$repeat_style" == "suffix02" || "$repeat_style" == "infix" ]] || continue
+        [ -n "$repeat_fields" ] || continue
+        repeat_group_styles[$repeat_group]="$repeat_style"
+        for target_key in $repeat_fields; do
+            [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+            repeat_key_groups[$target_key]="$repeat_group"
+            repeat_group_fields[$repeat_group]="${repeat_group_fields[$repeat_group]:-} $target_key"
+        done
+    done 7< "$example"
+
+    repeat_group_key() {
+        local group="$1"
+        local style="$2"
+        local field="$3"
+        local index="$4"
+
+        if [ "$index" -eq 1 ]; then
+            printf '%s\n' "$field"
+        elif [ "$style" = "infix" ]; then
+            printf '%s_%s_%s\n' "$group" "$index" "${field#${group}_}"
+        elif [ "$style" = "suffix02" ]; then
+            printf '%s_%02d\n' "$field" "$index"
+        else
+            printf '%s_%s\n' "$field" "$index"
+        fi
+    }
+
+    prepare_repeat_group() {
+        local group="$1"
+        local style="${repeat_group_styles[$group]}"
+        local fields="${repeat_group_fields[$group]}"
+        local index field mapped value all complete=false has_value=false slot_found=false next_index=1
+        local mode default_mode
+
+        [ -z "${REPEAT_GROUP_MODES[$group]+x}" ] || return 0
+
+        for ((index = 1; index <= 50; index++)); do
+            all=true
+            for field in $fields; do
+                mapped="$(repeat_group_key "$group" "$style" "$field" "$index")"
+                value="$(read_kv_file "$target" "$mapped" || true)"
+                case "${value,,}" in ""|blank|null) value="" ;; esac
+                if [ -z "$value" ]; then
+                    [[ -n "${repeat_optional_complete[$field]+x}" ]] || all=false
+                else
+                    has_value=true
+                fi
+            done
+            if [ "$all" = "true" ]; then
+                if [ "$has_value" = "true" ]; then
+                    complete=true
+                    continue
+                fi
+                slot_found=true
+                break
+            fi
+            next_index="$index"
+            slot_found=true
+            break
+        done
+        if [ "$slot_found" != "true" ]; then
+            echo "    no free $group slot" >&2
+            return 1
+        fi
+
+        mode="new"
+        if [ "$complete" = "true" ]; then
+            default_mode="skip"
+            while :; do
+                if [ -t 0 ]; then
+                    read -r -p "    $group [skip/new] (default: $default_mode): " repeat_choice || true
+                else
+                    repeat_choice="$default_mode"
+                fi
+                repeat_choice="${repeat_choice:-$default_mode}"
+                case "${repeat_choice,,}" in
+                    skip|s|1) mode="skip"; break ;;
+                    new|n|2) mode="new"; break ;;
+                    *) echo "    choose skip or new" ;;
+                esac
+            done
+        fi
+
+        REPEAT_GROUP_MODES[$group]="$mode"
+        REPEAT_GROUP_INDEXES[$group]="$next_index"
+    }
+
+    while IFS= read -r line <&5; do
+        stripped="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+
+        entry="${line%%#*}"
+        entry="$(trim "$entry")"
+        [[ "$entry" == *=* ]] || continue
+
+        key="$(trim "${entry%%=*}")"
+        default="$(trim "${entry#*=}")"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*_DB_(BACKEND|HOST|URL|PORT|NAME|USER|PW|PASSWORD|PREFIX)$ ]] || continue
+
+        db_defaults[$key]="$default"
+        if [[ -z "${db_seen_keys[$key]+x}" ]]; then
+            db_seen_keys[$key]=1
+            db_config_keys+=("$key")
+            [[ "$key" == *_DB_BACKEND ]] && db_backend_keys+=("$key")
+        fi
+    done 5< "$example"
+
+    while IFS= read -r line <&6; do
+        stripped="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$stripped" == \#valuedupe:* ]]; then
+            pending_value_dupe="$(trim "${stripped#\#valuedupe:}")"
+            [[ "$pending_value_dupe" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || pending_value_dupe=""
+            continue
+        fi
+        if [[ "$stripped" == \#reverse-varname:* ]]; then
+            pending_reverse_varname="$(trim "${stripped#\#reverse-varname:}")"
+            [[ "$pending_reverse_varname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || pending_reverse_varname=""
+            continue
+        fi
+        [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+
+        entry="${line%%#*}"
+        entry="$(trim "$entry")"
+        if [[ "$entry" == *=* && -n "$pending_value_dupe" ]]; then
+            key="$(trim "${entry%%=*}")"
+            if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                value_dupe_targets[$key]="$pending_value_dupe"
+            fi
+        fi
+        if [[ "$entry" == *=* && -n "$pending_reverse_varname" ]]; then
+            key="$(trim "${entry%%=*}")"
+            if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                reverse_varname_sources[$key]="$pending_reverse_varname"
+            fi
+        fi
+        pending_value_dupe=""
+        pending_reverse_varname=""
+    done 6< "$example"
+
+    if [ "$target" = "$ENV_FILE" ] && read_kv_file "$example" DB_AUTO >/dev/null 2>&1; then
+        db_auto_contract=true
+    fi
+
+    if [ "$target" = "$ENV_FILE" ] && [ "$db_auto_contract" = "false" ] && [ "${#db_backend_keys[@]}" -gt 1 ]; then
+        db_bulk_eligible=true
+        for key in "${db_config_keys[@]}"; do
+            if grep -q "^${key}=" "$target" 2>/dev/null; then
+                db_bulk_eligible=false
+                break
+            fi
+            if find_configured_value_elsewhere "$target" "$key" && [ -n "$OTHER_VALUE" ]; then
+                db_bulk_eligible=false
+                break
+            fi
+        done
+    fi
+
+    while IFS= read -r line <&4; do
+        stripped="${line#"${line%%[![:space:]]*}"}"
+        [[ "$stripped" == \#blank-if:* ]] || continue
+        directive="$(trim "${stripped#\#blank-if:}")"
+        [ -n "$directive" ] || continue
+
+        condition="${directive%%[[:space:]]*}"
+        target_list="${directive#"$condition"}"
+        target_list="$(trim "$target_list")"
+        [[ "$condition" == *=* ]] || continue
+
+        condition_key="$(trim "${condition%%=*}")"
+        condition_value="$(normalize_rule_value "${condition#*=}")"
+        [[ "$condition_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        [ -n "$target_list" ] || continue
+
+        rule_key="${condition_key}=${condition_value}"
+        blank_if_targets[$rule_key]="${blank_if_targets[$rule_key]:-} $target_list"
+    done 4< "$example"
+
+    activate_blank_rules() {
+        local control_key="$1"
+        local control_value="$2"
+        local rule_key targets target_key
+
+        rule_key="${control_key}=$(normalize_rule_value "$control_value")"
+        targets="${blank_if_targets[$rule_key]:-}"
+        [ -n "$targets" ] || return 0
+        for target_key in $targets; do
+            [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+            autofill_blank_keys[$target_key]=1
+        done
+    }
+
+    maybe_apply_value_dupe() {
+        local source_key="$1"
+        local source_value="$2"
+
+        value_dupe_target="${value_dupe_targets[$source_key]:-}"
+        [ -n "$value_dupe_target" ] || return 0
+        [ -n "$source_value" ] || return 0
+
+        value_dupe_existing="$(read_kv_file "$target" "$value_dupe_target" || true)"
+        [ -z "$value_dupe_existing" ] || return 0
+
+        value_dupe_choice="y"
+        if [ -t 0 ]; then
+            read -r -p "    Reuse $source_key value for $value_dupe_target? [Y/n]: " value_dupe_choice || true
+            value_dupe_choice="${value_dupe_choice:-y}"
+        fi
+        case "${value_dupe_choice,,}" in
+            y|yes)
+                write_config_value "$target" "$value_dupe_target" "$source_value"
+                echo "    $value_dupe_target= reused from $source_key"
+                ;;
+            n|no) ;;
+            *)
+                echo "    choose y or n" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    maybe_apply_reverse_varname() {
+        local alias_base_key="$1" alias_name="$2"
+        local source_base_key source_key source_value group index style
+
+        [ "$target" = "$ENV_FILE" ] || return 0
+        source_base_key="${reverse_varname_sources[$alias_base_key]:-}"
+        [ -n "$source_base_key" ] || return 0
+        [[ "$alias_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 0
+
+        source_key="$source_base_key"
+        group="${repeat_key_groups[$alias_base_key]:-}"
+        if [ -n "$group" ]; then
+            index="${REPEAT_GROUP_INDEXES[$group]}"
+            style="${repeat_group_styles[$group]}"
+            source_key="$(repeat_group_key "$group" "$style" "$source_base_key" "$index")"
+        fi
+        source_value="$(read_kv_file "$target" "$source_key" || true)"
+        [ -n "$source_value" ] || return 0
+        write_config_value "$target" "$alias_name" "$source_value"
+        echo "    $alias_name= injected from $source_key"
+    }
+
+    normalize_db_backend() {
+        normalize_db_backend_value "$1"
+    }
+
+    first_db_default() {
+        local suffix="$1"
+        local db_key
+
+        for db_key in "${db_config_keys[@]}"; do
+            [[ "$db_key" == *_DB_"$suffix" ]] || continue
+            if [ -n "${db_defaults[$db_key]:-}" ]; then
+                printf '%s\n' "${db_defaults[$db_key]}"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    read_bulk_db_value() {
+        local prompt="$1"
+        local preset="$2"
+        local secret="${3:-false}"
+        local input=""
+
+        while [ -z "$input" ]; do
+            if [ -t 0 ]; then
+                if [ "$secret" = "true" ]; then
+                    read -r -s -p "    $prompt: " input || true
+                    echo "" >&2
+                elif [ -n "$preset" ]; then
+                    read -e -i "$preset" -r -p "    $prompt: " input || true
+                else
+                    read -r -p "    $prompt: " input || true
+                fi
+            else
+                read -r input || true
+                [ -n "$input" ] || input="$preset"
+            fi
+            [ -n "$input" ] || echo "    $prompt required" >&2
+        done
+        printf '%s\n' "$input"
+    }
+
+    apply_bulk_db_config() {
+        local selected_backend="$1"
+        local common_host common_port common_name common_user common_pw
+        local db_key prefix suffix value default_name
+
+        selected_backend="$(normalize_db_backend "$selected_backend")"
+        if [ "$selected_backend" = "sqlite" ] || [ "$selected_backend" = "on_the_fly" ]; then
+            for db_key in "${db_config_keys[@]}"; do
+                if [[ "$db_key" == *_DB_BACKEND ]]; then
+                    write_config_value "$target" "$db_key" "$selected_backend"
+                else
+                    write_config_value "$target" "$db_key" "blank"
+                fi
+            done
+            if [ "$selected_backend" = "sqlite" ]; then
+                echo "    ${#db_backend_keys[@]} backends configured as sqlite in ./sqlite"
+            else
+                echo "    ${#db_backend_keys[@]} backends configured as on_the_fly"
+            fi
+            return 0
+        fi
+
+        common_host="$(first_db_default HOST || first_db_default URL || printf '127.0.0.1\n')"
+        case "$selected_backend" in
+            postgres) common_port="5432" ;;
+            mysql|mariadb) common_port="3306" ;;
+            *) common_port="$(first_db_default PORT || true)" ;;
+        esac
+        default_name="${CONTAINER_NAME//-/_}"
+
+        common_host="$(read_bulk_db_value "DB host" "$common_host")"
+        common_port="$(read_bulk_db_value "DB port" "$common_port")"
+        common_name="$(read_bulk_db_value "DB name" "$default_name")"
+        common_user="$(read_bulk_db_value "DB user" "$default_name")"
+        common_pw="$(read_bulk_db_value "DB password" "" true)"
+
+        for db_key in "${db_config_keys[@]}"; do
+            prefix="${db_key%%_DB_*}"
+            suffix="${db_key#${prefix}_DB_}"
+            case "$suffix" in
+                BACKEND) value="$selected_backend" ;;
+                HOST|URL) value="$common_host" ;;
+                PORT) value="$common_port" ;;
+                NAME) value="$common_name" ;;
+                USER) value="$common_user" ;;
+                PW|PASSWORD) value="$common_pw" ;;
+                PREFIX) value="${db_defaults[$db_key]:-${prefix,,}}" ;;
+                *) continue ;;
+            esac
+            write_config_value "$target" "$db_key" "$value"
+        done
+        echo "    ${#db_backend_keys[@]} backends configured as $selected_backend"
+    }
+
+    maybe_apply_bulk_db_config() {
+        local selected_backend="$1"
+        local bulk_choice=""
+
+        [ "$db_bulk_eligible" = "true" ] || return 1
+        [ "$db_bulk_decided" = "false" ] || return 1
+        selected_backend="$(normalize_db_backend "$selected_backend")"
+        case "$selected_backend" in
+            on_the_fly|sqlite|postgres|mysql|mariadb) ;;
+            *) return 1 ;;
+        esac
+        db_bulk_decided=true
+
+        echo ""
+        echo "    ${#db_backend_keys[@]} database backends found."
+        echo "      (1) use $selected_backend for all [default]"
+        echo "      (2) configure individually"
+        while :; do
+            if [ -t 0 ]; then
+                read -r -p "    Choose [1/2] (default: 1): " bulk_choice || true
+            else
+                read -r bulk_choice || true
+            fi
+            bulk_choice="${bulk_choice:-1}"
+            case "$bulk_choice" in
+                1)
+                    apply_bulk_db_config "$selected_backend"
+                    return 0
+                    ;;
+                2)
+                    return 1
+                    ;;
+                *) echo "    choose 1 or 2" ;;
+            esac
+        done
+    }
+
+    handle_display_env() {
+        local target="$1"
+        local choice read_status=0 val display_val no_at_bridge_val runtime_val line
+
+        display_val=":0"
+        no_at_bridge_val="1"
+        runtime_val="/run/user/$(id -u 2>/dev/null || printf '0')"
+
+        if [ -t 0 ]; then
+            echo "    DISPLAY:"
+            echo "      (1) autodetect GUI env"
+            echo "      (2) headless"
+            echo "      (3) enter manual"
+            read -r -p "    Choose [1/2/3] (default: 1): " choice || read_status=$?
+            choice="${choice:-1}"
+        else
+            choice="1"
+        fi
+
+        case "$choice" in
+            1)
+                while IFS= read -r line || [ -n "$line" ]; do
+                    case "$line" in
+                        DISPLAY=*) display_val="${line#DISPLAY=}" ;;
+                        NO_AT_BRIDGE=*) no_at_bridge_val="${line#NO_AT_BRIDGE=}" ;;
+                        XDG_RUNTIME_DIR=*) runtime_val="${line#XDG_RUNTIME_DIR=}" ;;
+                    esac
+                done < <(detect_gui_env_values || true)
+                ;;
+            2)
+                display_val=""
+                no_at_bridge_val="1"
+                runtime_val="/tmp/runtime-root"
+                ;;
+            3)
+                if [ -t 0 ]; then
+                    read -e -i "$display_val" -r -p "    DISPLAY: " val || read_status=$?
+                    [ -n "$val" ] && display_val="$val"
+                    read -e -i "$no_at_bridge_val" -r -p "    NO_AT_BRIDGE: " val || read_status=$?
+                    [ -n "$val" ] && no_at_bridge_val="$val"
+                    read -e -i "$runtime_val" -r -p "    XDG_RUNTIME_DIR: " val || read_status=$?
+                    [ -n "$val" ] && runtime_val="$val"
+                fi
+                ;;
+            *)
+                echo "    choose 1, 2 or 3"
+                return 1
+                ;;
+        esac
+
+        [ -n "$no_at_bridge_val" ] || no_at_bridge_val="1"
+        [ -n "$runtime_val" ] || runtime_val="/tmp/runtime-root"
+
+        write_config_value_if_missing "$target" "DISPLAY" "$display_val"
+        write_config_value_if_missing "$target" "NO_AT_BRIDGE" "$no_at_bridge_val"
+        write_config_value_if_missing "$target" "XDG_RUNTIME_DIR" "$runtime_val"
+        return "$read_status"
+    }
+
+    configure_telegram_chat_id() {
+        local output="$1"
+        local chat_key="$2"
+        local token_key="$3"
+        local current="$4"
+        local action token discovered key value number enter discover base="$chat_key"
+        local -a reusable=()
+
+        case "${current,,}" in ""|blank|null) current="" ;; esac
+        [[ "$base" =~ ^(.+)_([0-9]+)$ ]] && base="${BASH_REMATCH[1]}"
+        [ -z "$current" ] || reusable+=("$current")
+        while IFS='=' read -r key value; do
+            [[ "$key" == "$base" || "$key" =~ ^${base}_[0-9]+$ ]] || continue
+            case "${value,,}" in ""|blank|null) continue ;; esac
+            [[ " ${reusable[*]} " == *" $value "* ]] || reusable+=("$value")
+        done < "$output"
+        token="$(config_value "$token_key" || true)"
+        case "${token,,}" in ""|blank|null) token="" ;; esac
+        if [ -z "$token" ]; then
+            write_config_value "$output" "$chat_key" "$current"
+            echo "    $chat_key= inactive (no bot token)"
+            return 0
+        fi
+        if [ ! -t 0 ]; then
+            [ -n "$current" ] || { echo "    $chat_key required" >&2; return 1; }
+            write_config_value "$output" "$chat_key" "$current"; return 0
+        fi
+
+        while :; do
+            echo "    $chat_key:"
+            number=0
+            for value in "${reusable[@]}"; do number=$((number + 1)); echo "      ($number) reuse $value"; done
+            enter=$((number + 1)); discover=$((number + 2))
+            echo "      ($enter) enter"
+            echo "      ($discover) discover via /start"
+            read -r -p "    Choose [1-$discover] (default: 1): " action || return 130
+            action="${action:-1}"
+
+            if [[ "$action" =~ ^[0-9]+$ ]] && [ "$action" -ge 1 ] && [ "$action" -le "${#reusable[@]}" ]; then
+                discovered="${reusable[$((action - 1))]}"
+            elif [ "$action" = "$enter" ]; then
+                    read -r -p "    $chat_key: " discovered || return 130
+                    discovered="$(trim "$discovered")"
+                    [ -n "$discovered" ] || { echo "    chat ID must not be empty"; continue; }
+            elif [ "$action" = "$discover" ]; then
+                discovered="$(discover_telegram_chat_id "$token")" || continue
+            else
+                echo "    choose 1-$discover"; continue
+            fi
+            write_config_value "$output" "$chat_key" "$discovered"
+            echo "    $chat_key= set"
+            return 0
+        done
+    }
+
+    while IFS= read -r line <&3; do
+        stripped="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$stripped" == \#choices:* ]]; then
+            pending_choices="$(trim "${stripped#\#choices:}")"
+            continue
+        fi
+        if [[ "$stripped" == \#when:* ]]; then
+            pending_when="$(trim "${stripped#\#when:}")"
+            continue
+        fi
+        if [[ "$stripped" == \#when-not:* ]]; then
+            pending_when_not="$(trim "${stripped#\#when-not:}")"
+            continue
+        fi
+        if [[ "$stripped" == \#default-if:* ]]; then
+            pending_default_rules+="$(trim "${stripped#\#default-if:}")"$'\n'
+            continue
+        fi
+        if [[ "$stripped" == \#discover-telegram-chat:* ]]; then
+            pending_telegram_token="$(trim "${stripped#\#discover-telegram-chat:}")"
+            if [[ ! "$pending_telegram_token" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                echo "    invalid Telegram token variable: $pending_telegram_token" >&2
+                return 1
+            fi
+            continue
+        fi
+        if [[ "$stripped" == "#discover-podman-host-internal" ]]; then
+            pending_podman_host_internal=true
+            continue
+        fi
+        if [[ "$stripped" == \#required:* ]]; then
+            required_next=true
+            continue
+        fi
+        if [[ "$stripped" == "#secret" ]]; then
+            secret_next=true
+            continue
+        fi
+        if [[ -z "$stripped" ]]; then
+            required_next=false
+            secret_next=false
+            pending_choices=""
+            pending_when=""
+            pending_when_not=""
+            pending_default_rules=""
+            pending_telegram_token=""
+            pending_podman_host_internal=false
+            continue
+        fi
+        if [[ "$stripped" == \#* ]]; then
+            continue
+        fi
+        required="$required_next"
+        secret="$secret_next"
+        field_choices="$pending_choices"
+        field_when="$pending_when"
+        field_when_not="$pending_when_not"
+        field_default_rules="$pending_default_rules"
+        field_telegram_token="$pending_telegram_token"
+        field_podman_host_internal="$pending_podman_host_internal"
+        required_next=false
+        secret_next=false
+        pending_choices=""
+        pending_when=""
+        pending_when_not=""
+        pending_default_rules=""
+        pending_telegram_token=""
+        pending_podman_host_internal=false
+
+        entry="${line%%#*}"
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ "$entry" != *=* ]] && continue
+
+        key="${entry%%=*}"
+        default="${entry#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        default="${default#"${default%%[![:space:]]*}"}"
+        default="${default%"${default##*[![:space:]]}"}"
+        while IFS= read -r directive || [ -n "$directive" ]; do
+            [ -n "$directive" ] || continue
+            condition="${directive%%[[:space:]]*}"
+            value="$(trim "${directive#"$condition"}")"
+            [[ "$condition" == *=* ]] || continue
+            condition_key="${condition%%=*}"
+            condition_value="$(normalize_rule_value "${condition#*=}")"
+            existing="$(config_value "$condition_key" || true)"
+            if [ "$(normalize_rule_value "$existing")" = "$condition_value" ]; then
+                default="$value"
+            fi
+        done <<< "$field_default_rules"
+        default="${default//\$\{CONTAINER_NAME\}/$CONTAINER_NAME}"
+
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        base_key="$key"
+        repeat_group="${repeat_key_groups[$base_key]:-}"
+        telegram_token_key="$field_telegram_token"
+        if [ -n "$repeat_group" ]; then
+            prepare_repeat_group "$repeat_group"
+            [ "${REPEAT_GROUP_MODES[$repeat_group]}" = "new" ] || continue
+            repeat_style="${repeat_group_styles[$repeat_group]}"
+            repeat_index="${REPEAT_GROUP_INDEXES[$repeat_group]}"
+            key="$(repeat_group_key "$repeat_group" "$repeat_style" "$base_key" "$repeat_index")"
+            repeat_suffix=""
+            [ "$repeat_index" -eq 1 ] || printf -v repeat_suffix '_%02d' "$repeat_index"
+            default="${default//\$\{REPEAT_SUFFIX\}/$repeat_suffix}"
+            if [ "$repeat_index" -gt 1 ] && [[ -n "${repeat_freeform[$base_key]+x}" ]]; then
+                default=""
+                field_choices=""
+            fi
+            if [ -n "$telegram_token_key" ] && [ "${repeat_key_groups[$telegram_token_key]:-}" = "$repeat_group" ]; then
+                telegram_token_key="$(repeat_group_key "$repeat_group" "$repeat_style" "$telegram_token_key" "$repeat_index")"
+            fi
+        fi
+        if [ "$field_podman_host_internal" = "true" ]; then
+            if [ -z "$podman_host_internal_ip" ]; then
+                podman_host_internal_ip="$(discover_podman_host_internal_ip)"
+            fi
+            default="${default//@PODMAN_HOST_INTERNAL_IP@/$podman_host_internal_ip}"
+            field_choices="${field_choices//@PODMAN_HOST_INTERNAL_IP@/$podman_host_internal_ip}"
+        fi
+        if [ -n "$repeat_group" ] && [[ -n "${repeat_one_true[$base_key]+x}" ]]; then
+            for ((prior_index = 1; prior_index < repeat_index; prior_index++)); do
+                prior_key="$(repeat_group_key "$repeat_group" "$repeat_style" "$base_key" "$prior_index")"
+                prior_value="$(read_kv_file "$target" "$prior_key" || true)"
+                case "${prior_value,,}" in 1|true|yes|on) write_config_value "$target" "$key" 0; echo "    $key=0 ($prior_key is default)"; continue 2 ;; esac
+            done
+        fi
+        if [[ -n "${seen_keys[$key]+x}" ]]; then
+            echo "    duplicate $key in $(basename "$example")" >&2
+            continue
+        fi
+        seen_keys[$key]=1
+
+        if [[ "$container_nr" =~ ^[2-5]$ ]] && [[ "$key" == *_PUBLISH_PORT ]]; then
+            default="$(project_publish_port "$default" "$container_nr")"
+        fi
+
+        if [ "$db_auto_contract" = "true" ]; then
+            if db_auto_enabled_value; then
+                if [[ "$key" =~ ^DB_(BACKEND|HOST|PORT|NAME|USER|PASSWORD)$ ]]; then
+                    value="$(read_kv_file "$target" "$key" 2>/dev/null || true)"
+                    if ! db_value_is_meaningful "$value"; then
+                        sed -i "/^${key}=/d" "$target" 2>/dev/null || true
+                        if [[ -n "${DB_AUTO_MIGRATION_CONFLICTS[$key]+x}" ]] && [ ! -t 0 ]; then
+                            echo "DB_AUTO=1 requires an explicit $key because existing services differ; rerun interactively, set $key, or choose DB_AUTO=0" >&2
+                            return 1
+                        fi
+                    fi
+                fi
+                if [[ "$key" =~ ^([A-Za-z_][A-Za-z0-9_]*)_DB_(BACKEND|HOST|URL|PORT|NAME|USER|PW|PASSWORD|PREFIX)$ ]] \
+                    && db_auto_service_group_declared "${BASH_REMATCH[1]}"; then
+                    echo "    $key= managed by DB_AUTO"
+                    continue
+                fi
+            elif [[ "$key" =~ ^DB_(BACKEND|HOST|PORT|NAME|USER|PASSWORD)$ ]]; then
+                write_config_value "$target" "$key" "blank"
+                echo "    $key= blank (DB_AUTO=0)"
+                continue
+            fi
+        fi
+
+        if [ -n "$field_when" ]; then
+            condition_key="${field_when%%=*}"
+            condition_value="$(normalize_rule_value "${field_when#*=}")"
+            existing="$(config_value "$condition_key" || true)"
+            if [ "$(normalize_rule_value "$existing")" != "$condition_value" ]; then
+                write_config_value "$target" "$key" "blank"
+                echo "    $key= blank"
+                continue
+            fi
+        fi
+        if [ -n "$field_when_not" ]; then
+            condition_key="${field_when_not%%=*}"
+            condition_value="$(normalize_rule_value "${field_when_not#*=}")"
+            existing="$(config_value "$condition_key" || true)"
+            if [ "$(normalize_rule_value "$existing")" = "$condition_value" ]; then
+                write_config_value "$target" "$key" "blank"
+                echo "    $key= blank"
+                continue
+            fi
+        fi
+
+        if [ "$container_nr" = "TUN" ] && [[ "$key" == *_PUBLISH_PORT ]]; then
+            write_config_value "$target" "$key" ""
+            echo "    $key= disabled by CONTAINER_NR=TUN"
+            continue
+        fi
+
+        if [[ -n "${skip_existing_keys[$key]+x}" ]]; then
+            continue
+        fi
+
+        if [[ -n "${autofill_blank_keys[$key]+x}" ]]; then
+            sed -i "/^${key}=/d" "$target" 2>/dev/null || true
+            echo "$key=blank" >> "$target"
+            echo "    $key= blank"
+            continue
+        fi
+
+        existing_line="$(grep "^${key}=" "$target" 2>/dev/null | head -1 || true)"
+        existing="${existing_line#*=}"
+        if [ "$field_podman_host_internal" = "true" ] && [[ "$existing" == *"@PODMAN_HOST_INTERNAL_IP@"* ]]; then
+            existing="${existing//@PODMAN_HOST_INTERNAL_IP@/$podman_host_internal_ip}"
+            write_config_value "$target" "$key" "$existing"
+            existing_line="$key=$existing"
+        fi
+        other_existing=false
+        if find_configured_value_elsewhere "$target" "$key" && [ -n "$OTHER_VALUE" ]; then
+            other_existing=true
+        fi
+        if [ -n "$telegram_token_key" ]; then
+            if [[ -n "${TELEGRAM_CHAT_HANDLED[$key]+x}" ]]; then
+                echo "    $key= already configured"
+                continue
+            fi
+            telegram_existing="$existing"
+            if [ -z "$telegram_existing" ] && [ "$other_existing" = "true" ]; then
+                telegram_existing="$OTHER_VALUE"
+            fi
+            configure_telegram_chat_id "$target" "$key" "$telegram_token_key" "$telegram_existing"
+            TELEGRAM_CHAT_HANDLED[$key]=1
+            val="$(read_kv_file "$target" "$key" || true)"
+            activate_blank_rules "$key" "$val"
+            continue
+        fi
+        if [ "$other_existing" = "true" ] && { [ -z "$existing_line" ] || [ -z "$existing" ]; }; then
+            [ -z "$existing_line" ] || sed -i "/^${key}=/d" "$target" 2>/dev/null || true
+            externally_owned_keys[$key]=1
+            echo "    $key= exists in $(basename "$OTHER_VALUE_FILE")"
+            maybe_apply_value_dupe "$key" "$OTHER_VALUE"
+            maybe_apply_reverse_varname "$base_key" "$OTHER_VALUE"
+            activate_blank_rules "$key" "$OTHER_VALUE"
+            continue
+        fi
+        if [ -n "$existing_line" ] && { [ "$required" != "true" ] || [ -n "$existing" ]; }; then
+            if [ "$target" = "$ENV_FILE" ]; then
+                echo "    $key= exists"
+            else
+                echo "    $key=$existing"
+            fi
+            maybe_apply_value_dupe "$key" "$existing"
+            maybe_apply_reverse_varname "$base_key" "$existing"
+            activate_blank_rules "$key" "$existing"
+            continue
+        fi
+        sed -i "/^${key}=$/d" "$target" 2>/dev/null || true
+
+        if [ "$key" = "DISPLAY" ]; then
+            handle_display_env "$target"
+            skip_existing_keys[NO_AT_BRIDGE]=1
+            skip_existing_keys[XDG_RUNTIME_DIR]=1
+            continue
+        fi
+
+        while :; do
+            if [ "$publish_port_autofill" = "true" ] && [[ "$key" == *_PUBLISH_PORT ]]; then
+                val="$default"
+                used_prefill=true
+                read_status=0
+                echo "    $key=$val"
+                break
+            fi
+            used_prefill=false
+            read_status=0
+            prompt_suffix=""
+            field_choice_values=()
+            field_choice_count=0
+            field_choice_total=0
+            field_choice_default=""
+            field_choice_numbers=""
+            field_choice_freeform=false
+            field_choice_selected_freeform=false
+            if [ "$required" = "true" ] && openssl_generator_default "$default"; then
+                generator_label="$(openssl_generator_label "$default")"
+                if [ -t 0 ]; then
+                    echo "    $key:"
+                    echo "      (1) enter value"
+                    echo "      (2) generate $generator_label"
+                    read -r -p "    Choose [1/2] (default: 2): " choice || read_status=$?
+                    choice="${choice:-2}"
+                    case "$choice" in
+                        1)
+                            if [ "$secret" = "true" ]; then
+                                read -r -s -p "    $key: " val || read_status=$?
+                                echo "" >&2
+                            else
+                                read -r -p "    $key: " val || read_status=$?
+                            fi
+                            ;;
+                        2)
+                            val="$(run_openssl_generator "$default")" || {
+                                echo "    $key generator failed" >&2
+                                exit 1
+                            }
+                            echo "    $key= generated"
+                            ;;
+                        *)
+                            echo "    choose 1 or 2"
+                            val=""
+                            ;;
+                    esac
+                else
+                    val="$(run_openssl_generator "$default")" || {
+                        echo "    $key generator failed" >&2
+                        exit 1
+                    }
+                    echo "    $key= generated"
+                fi
+                if [ "$required" != "true" ] || [ -n "$val" ]; then
+                    break
+                fi
+                if [ "$read_status" -ne 0 ] && [ ! -t 0 ]; then
+                    echo "    $key required" >&2
+                    exit 1
+                fi
+                echo "    $key required"
+                continue
+            fi
+            if [ "$required" != "true" ] && openssl_generator_default "$default"; then
+                generator_label="$(openssl_generator_label "$default")"
+                if [ -t 0 ]; then
+                    echo "    $key:"
+                    echo "      (1) skip"
+                    echo "      (2) enter value"
+                    echo "      (3) generate $generator_label"
+                    choice=""
+                    read -r -p "    Choose [1/2/3] (default: 1): " choice || read_status=$?
+                    choice="${choice:-1}"
+                    case "$choice" in
+                        1)
+                            val=""
+                            ;;
+                        2)
+                            if [ "$secret" = "true" ]; then
+                                read -r -s -p "    $key: " val || read_status=$?
+                                echo "" >&2
+                            else
+                                read -r -p "    $key: " val || read_status=$?
+                            fi
+                            ;;
+                        3)
+                            val="$(run_openssl_generator "$default")" || {
+                                echo "    $key generator failed" >&2
+                                exit 1
+                            }
+                            echo "    $key= generated"
+                            ;;
+                        *)
+                            echo "    choose 1, 2 or 3"
+                            continue
+                            ;;
+                    esac
+                else
+                    val=""
+                fi
+                break
+            fi
+            if provider_selector_key "$key"; then
+                prompt_suffix="$(provider_prompt "$example" "$key")"
+            elif [ -n "$field_choices" ]; then
+                [ ! -t 0 ] || printf '    %s:\n' "$key"
+                read -r -a field_choice_values <<< "$field_choices"
+                field_choice_count="${#field_choice_values[@]}"
+                field_choice_total="$field_choice_count"
+                [[ -z "${repeat_freeform[$base_key]+x}" ]] || {
+                    field_choice_freeform=true
+                    field_choice_total=$((field_choice_total + 1))
+                }
+                for ((field_choice_index = 0; field_choice_index < field_choice_count; field_choice_index++)); do
+                    if [ -t 0 ]; then
+                        printf '      (%d) %s\n' \
+                            "$((field_choice_index + 1))" \
+                            "${field_choice_values[$field_choice_index]}"
+                    fi
+                    if [ "$default" = "${field_choice_values[$field_choice_index]}" ]; then
+                        field_choice_default="$((field_choice_index + 1))"
+                    fi
+                done
+                if [ "$field_choice_freeform" = "true" ] && [ -t 0 ]; then
+                    printf '      (%d) enter custom value\n' "$field_choice_total"
+                fi
+                for ((field_choice_index = 1; field_choice_index <= field_choice_total; field_choice_index++)); do
+                    [ -z "$field_choice_numbers" ] \
+                        && field_choice_numbers="$field_choice_index" \
+                        || field_choice_numbers="$field_choice_numbers/$field_choice_index"
+                done
+                prompt_suffix="[$field_choice_numbers]"
+            fi
+            if [ "$secret" = "true" ] && [ -t 0 ]; then
+                read -r -s -p "    $key ${prompt_suffix}: " val || read_status=$?
+                echo "" >&2
+            elif [ -n "$field_choices" ] && [ -t 0 ]; then
+                if [ -n "$field_choice_default" ]; then
+                    read -r -p "    Choose ${prompt_suffix} (default: $field_choice_default): " val || read_status=$?
+                else
+                    read -r -p "    Choose ${prompt_suffix}: " val || read_status=$?
+                fi
+            elif [ -n "$default" ] && [ -t 0 ]; then
+                read -e -i "$default" -r -p "    $key ${prompt_suffix}: " val || read_status=$?
+                used_prefill=true
+            else
+                if [ -n "$default" ]; then
+                    printf "    %s %s[%s]: " "$key" "$prompt_suffix" "$default"
+                else
+                    printf "    %s %s: " "$key" "$prompt_suffix"
+                fi
+                read -r val || read_status=$?
+            fi
+            if [ "$used_prefill" != "true" ] && [ -z "$val" ]; then
+                val="$default"
+            fi
+            if provider_selector_key "$key"; then
+                val="$(normalize_provider_value "$example" "$key" "$val")"
+            fi
+            # Optional choice fields must accept an empty answer. Otherwise an
+            # empty default (for example a repeatable ADDITIONAL_LINE) can
+            # never leave this prompt and loops forever on Enter or EOF.
+            if [ -z "$val" ] && [ "$required" != "true" ]; then
+                break
+            fi
+            if [ -n "$field_choices" ]; then
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    if [ "$val" -ge 1 ] && [ "$val" -le "$field_choice_count" ]; then
+                        val="${field_choice_values[$((val - 1))]}"
+                    elif [ "$field_choice_freeform" = "true" ] && [ "$val" -eq "$field_choice_total" ]; then
+                        field_choice_selected_freeform=true
+                        if [ -t 0 ]; then
+                            read -r -p "    $key custom value: " val || read_status=$?
+                        else
+                            read -r val || read_status=$?
+                        fi
+                        val="$(trim "$val")"
+                        if [ -z "$val" ]; then
+                            echo "    custom value required"
+                            continue
+                        fi
+                    fi
+                fi
+                if [ "$field_choice_selected_freeform" != "true" ] \
+                    && ! printf '%s\n' "${field_choice_values[@]}" | grep -Fxq "$val"; then
+                    echo "    choose ${field_choice_numbers//\//, }"
+                    val=""
+                    continue
+                fi
+            fi
+            if [ -n "$repeat_group" ] && [[ -n "${repeat_unique[$base_key]+x}" ]]; then
+                duplicate=""
+                for ((prior_index = 1; prior_index <= 50; prior_index++)); do
+                    [ "$prior_index" -eq "$repeat_index" ] && continue
+                    prior_key="$(repeat_group_key "$repeat_group" "$repeat_style" "$base_key" "$prior_index")"
+                    prior_value="$(read_kv_file "$target" "$prior_key" || true)"
+                    [ -z "$prior_value" ] || [ "$(normalize_rule_value "$prior_value")" != "$(normalize_rule_value "$val")" ] || { duplicate="$prior_value"; break; }
+                done
+                if [ -n "$duplicate" ]; then
+                    echo "    $base_key already exists: $duplicate"
+                    [ -t 0 ] || return 1
+                    while :; do
+                        read -r -p "    $repeat_group [skip/new] (default: skip): " repeat_choice || return 130
+                        case "${repeat_choice:-skip}" in
+                            skip|s|1) REPEAT_GROUP_MODES[$repeat_group]=skip; val=""; break ;;
+                            new|n|2) val=""; break ;;
+                            *) echo "    choose skip or new" ;;
+                        esac
+                    done
+                    [ "${REPEAT_GROUP_MODES[$repeat_group]}" = skip ] && break
+                    continue
+                fi
+            fi
+            if [ "$required" != "true" ] || [ -n "$val" ]; then
+                break
+            fi
+            if [ "$read_status" -ne 0 ] && [ ! -t 0 ]; then
+                echo "    $key required" >&2
+                exit 1
+            fi
+            echo "    $key required"
+        done
+
+        if [ -z "$val" ]; then
+            if [ "$required" != "true" ] && openssl_generator_default "$default"; then
+                echo "$key=" >> "$target"
+                echo "    $key= skipped"
+                continue
+            elif [ "$used_prefill" = "true" ] && [ -n "$default" ]; then
+                echo "$key=" >> "$target"
+                echo "    $key= set empty"
+                continue
+            else
+                echo "    $key= skipped"
+                continue
+            fi
+        fi
+        if [[ "$key" == *_DB_BACKEND ]] && maybe_apply_bulk_db_config "$val"; then
+            continue
+        fi
+        if [ "$db_auto_contract" = "true" ] && [ "$key" = "DB_AUTO" ]; then
+            DB_AUTO_SELECTED_VALUE="$val"
+            if [ "$val" = "1" ] && [ "${#DB_AUTO_MIGRATION_CONFLICTS[@]}" -gt 0 ]; then
+                db_auto_pending_write=true
+                echo "    DB_AUTO=1 selected; write deferred until migration values are resolved"
+                continue
+            fi
+        fi
+        echo "$key=$val" >> "$target"
+        if [ "$key" = "CONTAINER_NR" ]; then
+            case "${val^^}" in
+                TUN) container_nr="TUN" ;;
+                [2-5]) container_nr="$val" ;;
+                *) container_nr="" ;;
+            esac
+        fi
+        maybe_apply_value_dupe "$key" "$val"
+        maybe_apply_reverse_varname "$base_key" "$val"
+        activate_blank_rules "$key" "$val"
+    done 3< "$example"
+
+    if [ "$db_auto_pending_write" = "true" ]; then
+        write_config_value "$target" DB_AUTO 1
+    fi
+    rewrite_config_with_comments "$example" "$target"
+    for key in "${!externally_owned_keys[@]}"; do
+        sed -i "/^${key}=/d" "$target"
+    done
+}
+
+existing_image() {
+    local quadlet="$DIR/$CONTAINER_NAME.container"
+    local compose="$DIR/docker-compose.yml"
+    $CONTAINER_NAME_MODE && compose="$DIR/$CONTAINER_NAME-compose.yml"
+
+    if [ -f "$quadlet" ]; then
+        awk -F= '/^Image=/{print $2; exit}' "$quadlet"
+        return 0
+    fi
+    if [ -f "$compose" ]; then
+        awk '
+        /^[[:space:]]*image:[[:space:]]*/ {
+            sub(/^[[:space:]]*image:[[:space:]]*/, "")
+            gsub(/^["'\''"]|["'\''"]$/, "")
+            print
+            exit
+        }' "$compose"
+        return 0
+    fi
+}
+
+project_image() {
+    local upper_name
+    local configured
+    upper_name="$(printf '%s' "$PROJECT_NAME" | tr '[:lower:]-' '[:upper:]_')"
+
+    configured="${CONFIG_CONTAINER_IMAGE:-}"
+    if [ -n "$configured" ]; then
+        [[ "$configured" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]] || {
+            echo "Invalid CONFIG_CONTAINER_IMAGE: $configured" >&2
+            return 1
+        }
+        printf '%s\n' "$configured"
+        return 0
+    fi
+    configured="$(config_value "${upper_name}_IMAGE" || true)"
+    if [ -n "$configured" ]; then
+        printf '%s\n' "$configured"
+        return 0
+    fi
+    configured="$(config_value "IMAGE" || true)"
+    if [ -n "$configured" ]; then
+        printf '%s\n' "$configured"
+        return 0
+    fi
+    existing_image | grep -m1 . && return 0
+    printf 'localhost/%s:latest\n' "$CONTAINER_NAME"
+}
+
+config_source_files() {
+    if [ -f "$CONFIG_FILE" ]; then
+        printf '%s\n' "$CONFIG_FILE"
+    elif [ -n "$CONFIG_EXAMPLE" ] && [ -f "$CONFIG_EXAMPLE" ]; then
+        printf '%s\n' "$CONFIG_EXAMPLE"
+    fi
+    if [ "$NO_CONTAINER" != "true" ]; then
+        if [ -f "$CONTAINER_FILE" ]; then
+            printf '%s\n' "$CONTAINER_FILE"
+        elif [ -n "$CONTAINER_EXAMPLE" ] && [ -f "$CONTAINER_EXAMPLE" ]; then
+            printf '%s\n' "$CONTAINER_EXAMPLE"
+        fi
+    fi
+}
+
+mount_if_source_files() {
+    [ -z "$ENV_EXAMPLE" ] || printf '%s\n' "$ENV_EXAMPLE"
+    [ -z "$CONFIG_EXAMPLE" ] || printf '%s\n' "$CONFIG_EXAMPLE"
+    if [ "$NO_CONTAINER" != "true" ] && [ -n "$CONTAINER_EXAMPLE" ]; then
+        printf '%s\n' "$CONTAINER_EXAMPLE"
+    fi
+}
+
+container_command_mode() {
+    local source_file line stripped mode
+
+    while IFS= read -r source_file || [ -n "$source_file" ]; do
+        [ -f "$source_file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            stripped="$(trim "$line")"
+            [[ "$stripped" == \#container-command:* ]] || continue
+            mode="$(trim "${stripped#\#container-command:}")"
+            mode="${mode,,}"
+            case "$mode" in
+                auto|image) printf '%s\n' "$mode"; return 0 ;;
+                *) echo "Invalid #container-command mode: $mode" >&2; return 1 ;;
+            esac
+        done < "$source_file"
+    done < <(mount_if_source_files)
+    printf 'auto\n'
+}
+
+publish_host_key() {
+    local source_file line stripped directive target_key
+
+    while IFS= read -r source_file || [ -n "$source_file" ]; do
+        [ -f "$source_file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            stripped="$(trim "$line")"
+            [[ "$stripped" == \#publish-host:* ]] || continue
+            directive="$(trim "${stripped#\#publish-host:}")"
+            for target_key in $directive; do
+                [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                printf '%s\n' "$target_key"
+                return 0
+            done
+        done < "$source_file"
+    done < <(mount_if_source_files)
+    return 1
+}
+
+mount_bind_from_value() {
+    local key="$1"
+    local target_override="${2:-}"
+    local rel
+
+    rel="$(config_value "$key" || true)"
+    [ -n "$rel" ] || return 0
+    add_repo_bind_mount "$rel" "$target_override"
+}
+
+# Optional static image port, separate from user-configurable host publication.
+container_fixed_port() {
+    local requested="$1" source_file line directive key port
+    while IFS= read -r source_file || [ -n "$source_file" ]; do
+        [ -f "$source_file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="$(trim "$line")"
+            [[ "$line" == \#container-port:* ]] || continue
+            directive="$(trim "${line#\#container-port:}")"
+            read -r key port <<< "$directive"
+            [ "$key" = "$requested" ] || continue
+            [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || {
+                echo "Invalid #container-port for $key" >&2
+                return 1
+            }
+            printf '%s\n' "$port"
+            return 0
+        done < "$source_file"
+    done < <(mount_if_source_files)
+}
+
+# #volume-if: VOLUME_KEY KEY [OTHER_KEY=value ...] uses OR, never shell eval.
+# Bare keys mean nonempty/enabled; KEY>0 accepts positive decimal integers.
+volume_rule_matches() {
+    local rule key value
+    local -a rules=()
+    read -ra rules <<< "$1"
+    for rule in "${rules[@]}"; do
+        key="${rule%%[=>]*}"
+        value="$(config_value "$key")" || continue
+        case "$rule" in
+            *'>0') [[ "$value" =~ ^[0-9]+$ && "$value" =~ [1-9] ]] && return 0 ;;
+            *=*) [ "$(normalize_rule_value "$value")" = "$(normalize_rule_value "${rule#*=}")" ] && return 0 ;;
+            *) case "${value,,}" in ""|blank|null|0|false|no|off) ;; *) return 0 ;; esac ;;
+        esac
+    done
+    return 1
+}
+
+# Commas inside mount options (ro,z) are not separators between volumes.
+split_volume_items() {
+    mapfile -t items < <(printf '%s\n' "$1" | sed -E 's/,([^,:]+:)/\n\1/g')
+}
+
+generate_container_files() {
+    local source_file host image compose_file quadlet_file line stripped entry key value
+    local prefix internal_key internal_port publish_port publish_host map enabled_key enabled_value
+    local first_port="" command_host="0.0.0.0"
+    local directive condition condition_key condition_value target_list target_key target_path rel
+    local host_key
+    local -a ports=()
+    local -a volumes=()
+    local -a commented_volumes=()
+    local -a conditional_volume_keys=()
+    local -a conditions=()
+    local -A volume_rules=()
+    local -a devices=()
+    local -a caps=()
+    local -a named_volumes=()
+    local -a persistent_envs=()
+    local -a additional_lines=()
+    local item source container_nr_value command_mode compose_volume rules active
+    local tunnel_only=false
+    local registry_autoupdate=true
+    local publish_port_declared=false
+
+    container_nr_value="$(config_value CONTAINER_NR || true)"
+    [ "${container_nr_value^^}" = "TUN" ] && tunnel_only=true
+
+    host_key="$(publish_host_key || true)"
+    if [ -n "$host_key" ]; then
+        host="$(config_value "$host_key" || true)"
+    else
+        host=""
+    fi
+    [ -n "$host" ] || host="127.0.0.1"
+    image="$(project_image)"
+    command_mode="$(container_command_mode)"
+    compose_file="$DIR/docker-compose.yml"
+    $CONTAINER_NAME_MODE && compose_file="$DIR/$CONTAINER_NAME-compose.yml"
+    quadlet_file="$DIR/$CONTAINER_NAME.container"
+
+    while IFS= read -r source_file || [ -n "$source_file" ]; do
+        [ -f "$source_file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            stripped="$(trim "$line")"
+            if [[ "$stripped" == \#volume-if:* ]]; then
+                read -r key rules <<< "${stripped#\#volume-if:}"
+                [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*_VOLUMES$ && -n "$rules" ]] || {
+                    echo "Invalid #volume-if: expected VOLUME_KEY and conditions" >&2
+                    return 1
+                }
+                read -ra conditions <<< "$rules"
+                for condition in "${conditions[@]}"; do
+                    [[ "$condition" =~ ^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_./:-]*|\>0)?$ ]] || {
+                        echo "Invalid #volume-if condition for $key" >&2
+                        return 1
+                    }
+                done
+                volume_rules[$key]+=" $rules"
+                add_unique "$key" conditional_volume_keys
+                continue
+            fi
+            if [[ "$stripped" == \#mount-bind-ro-shared:* ]]; then
+                directive="$(trim "${stripped#\#mount-bind-ro-shared:}")"
+                target_key="${directive%%:*}"
+                target_path="${directive#*:}"
+                [[ "$directive" == *:* \
+                    && "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                value="$(config_value "$target_key" || true)"
+                add_readonly_shared_bind_mount "$value" "$target_path"
+                continue
+            fi
+            if [[ "$stripped" == \#mount-bind:* ]]; then
+                directive="$(trim "${stripped#\#mount-bind:}")"
+                [ -n "$directive" ] || continue
+                for target_key in $directive; do
+                    target_path=""
+                    if [[ "$target_key" == *:* ]]; then
+                        target_path="${target_key#*:}"
+                        target_key="${target_key%%:*}"
+                    fi
+                    [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                    mount_bind_from_value "$target_key" "$target_path"
+                done
+                continue
+            fi
+            [[ "$stripped" == \#mount-if:* ]] || continue
+            directive="$(trim "${stripped#\#mount-if:}")"
+            [ -n "$directive" ] || continue
+
+            condition="${directive%%[[:space:]]*}"
+            target_list="${directive#"$condition"}"
+            target_list="$(trim "$target_list")"
+            [[ "$condition" == *=* ]] || continue
+
+            condition_key="$(trim "${condition%%=*}")"
+            condition_value="$(normalize_rule_value "${condition#*=}")"
+            [[ "$condition_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+            [ -n "$target_list" ] || continue
+
+            value="$(config_value "$condition_key" || true)"
+            [ "$(normalize_rule_value "$value")" = "$condition_value" ] || continue
+            for rel in $target_list; do
+                add_repo_bind_mount "$rel"
+            done
+        done < "$source_file"
+    done < <(mount_if_source_files)
+
+    while IFS= read -r source_file || [ -n "$source_file" ]; do
+        [ -f "$source_file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            stripped="$(trim "$line")"
+            [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+
+            entry="${line%%#*}"
+            entry="$(trim "$entry")"
+            [[ "$entry" == *=* ]] || continue
+
+            key="$(trim "${entry%%=*}")"
+            value="$(config_value "$key" || true)"
+
+            if [[ "$key" =~ ^ADDITIONAL_LINE(_[0-9]+)?$ ]]; then
+                case "${value,,}" in ""|blank|null) ;; *) add_unique "$value" additional_lines ;; esac
+                continue
+            fi
+
+            if [[ "$key" == *_PUBLISH_PORT ]]; then
+                publish_port_declared=true
+                [ "$tunnel_only" = "true" ] && continue
+                prefix="${key%_PUBLISH_PORT}"
+                enabled_key="${prefix}_ENABLED"
+                if enabled_value="$(config_value "$enabled_key")"; then
+                    [ "$enabled_value" = "true" ] || continue
+                fi
+                case "${value,,}" in ""|blank|null) continue ;; esac
+                internal_key="${prefix}_PORT"
+                internal_port="$(container_fixed_port "$key")" || return 1
+                [ -n "$internal_port" ] || internal_port="$(config_value "$internal_key" || true)"
+                [ -n "$internal_port" ] || internal_port="$value"
+                publish_port="$value"
+                publish_host="$(config_value "${prefix}_PUBLISH_HOST" || true)"
+                [ -n "$publish_host" ] || publish_host="$host"
+                map="${publish_host}:${publish_port}:${internal_port}"
+                add_unique "$map" ports
+                [ -n "$first_port" ] || first_port="$internal_port"
+                continue
+            fi
+
+            if [[ "$key" == "PORT" || ( "$key" == *_PORT && "$key" != *_PUBLISH_PORT ) ]]; then
+                [ -n "$first_port" ] || first_port="$value"
+                continue
+            fi
+
+            if [[ "$key" == *_CAPABILITIES ]]; then
+                IFS=',' read -ra items <<< "$value"
+                for item in "${items[@]}"; do add_unique "$(trim "$item")" caps; done
+                continue
+            fi
+
+            if [[ "$key" == *_DEVICES ]]; then
+                IFS=',' read -ra items <<< "$value"
+                for item in "${items[@]}"; do add_unique "$(trim "$item")" devices; done
+                continue
+            fi
+
+            if [[ "$key" == *_VOLUMES ]]; then
+                [[ -z "${volume_rules[$key]+x}" ]] || continue
+                value="$(expand_volume_value "$key" "$value")" || return 1
+                split_volume_items "$value"
+                for item in "${items[@]}"; do
+                    item="$(trim "$item")"
+                    source="${item%%:*}"
+                    item="$(normalize_volume_item "$item")"
+                    add_unique "$item" volumes
+                    if [[ "$source" != /* && "$source" != .* && "$source" != *"/"* ]]; then
+                        add_unique "$source" named_volumes
+                    fi
+                done
+                continue
+            fi
+        done < "$source_file"
+    done < <(config_source_files)
+
+    # Always render declared conditional mounts, even with missing credentials.
+    # Explicit blank disables a mount; its example supplies the commented path.
+    for key in "${conditional_volume_keys[@]}"; do
+        value="$(config_value "$key" || true)"
+        active=false
+        case "${value,,}" in
+            ""|blank|null)
+                while IFS= read -r source_file; do
+                    value="$(read_kv_file "$source_file" "$key")" && break
+                done < <(mount_if_source_files)
+                ;;
+            *) if volume_rule_matches "${volume_rules[$key]}"; then active=true; fi ;;
+        esac
+        case "${value,,}" in ""|blank|null)
+            echo "#volume-if requires a nonempty mount example for $key" >&2
+            return 1 ;;
+        esac
+        value="$(expand_volume_value "$key" "$value")" || return 1
+        split_volume_items "$value"
+        for item in "${items[@]}"; do
+            item="$(trim "$item")"
+            [ -n "$item" ] || continue
+            source="${item%%:*}"
+            item="$(normalize_volume_item "$item")"
+            if $active; then
+                add_unique "$item" volumes
+                if [[ "$source" != /* && "$source" != .* && "$source" != *"/"* ]]; then
+                    add_unique "$source" named_volumes
+                fi
+            else
+                add_unique "$item" commented_volumes
+            fi
+        done
+    done
+
+    add_repo_sot_file_mounts
+    add_sqlite_volume_mounts
+    add_optional_persistence_mounts
+
+    for item in "${additional_lines[@]}"; do
+        [[ "$item" != Pull=never ]] || registry_autoupdate=false
+    done
+
+    if [ "$tunnel_only" != "true" ] && [ "$publish_port_declared" != "true" ] \
+        && [ "${#ports[@]}" -eq 0 ] && [ -n "$first_port" ]; then
+        add_unique "${host}:${first_port}:${first_port}" ports
+    fi
+
+    if [ "$command_mode" != image ] && [ -z "$first_port" ] && [ ! -f "$DIR/webui.py" ]; then
+        return 0
+    fi
+    if [ "$command_mode" != image ] && [ -z "$first_port" ]; then
+        echo "  No PORT or *_PORT found; skipping docker-compose.yml and $CONTAINER_NAME.container"
+        return 0
+    fi
+
+    {
+        printf '# Generated by config.sh for %s\n' "$PROJECT_NAME"
+        printf '# Edit config.conf, then run ./config.sh again.\n'
+        printf '# Usage: docker compose up -d\n\n'
+        printf 'services:\n'
+        printf '  %s:\n' "$CONTAINER_NAME"
+        if [ -f "$DIR/Containerfile" ] || [ -f "$DIR/Dockerfile" ]; then
+            printf '    # Local build context detected by config.sh\n'
+            printf '    build:\n'
+            printf '      context: .\n'
+            [ -f "$DIR/Containerfile" ] && printf '      dockerfile: Containerfile\n'
+            [ ! -f "$DIR/Containerfile" ] && [ -f "$DIR/Dockerfile" ] && printf '      dockerfile: Dockerfile\n'
+        fi
+        printf '    # Container image from config or existing generated file\n'
+        printf '    image: %s\n' "$image"
+        if $registry_autoupdate; then
+            printf '    labels:\n'
+            printf '      - "io.containers.autoupdate=registry"\n'
+        else
+            printf '    pull_policy: never\n'
+        fi
+        printf '    container_name: %s\n' "$CONTAINER_NAME"
+        printf '    hostname: %s\n' "$CONTAINER_NAME"
+        if [ "${#ports[@]}" -gt 0 ]; then
+            printf '    # Port mappings: publish host:PUBLISH_PORT:PORT from config.conf/container.conf\n'
+            printf '    ports:\n'
+            for item in "${ports[@]}"; do printf '      - "%s"\n' "$item"; done
+        fi
+        if [ -f "$CONFIG_FILE" ] || [ -f "$ENV_FILE" ]; then
+            printf '    # Runtime configuration files generated from *example files\n'
+            printf '    env_file:\n'
+            [ -f "$CONFIG_FILE" ] && printf '      - %s\n' "$CONFIG_FILE"
+            [ -f "$ENV_FILE" ] && printf '      - %s\n' "$ENV_FILE"
+        fi
+        if [ "${#persistent_envs[@]}" -gt 0 ]; then
+            printf '    environment:\n'
+            for item in "${persistent_envs[@]}"; do printf '      - "%s"\n' "$item"; done
+        fi
+        if [ -f "$DIR/webui.py" ] && [ "$command_mode" = auto ]; then
+            printf '    # Container-internal bind address; published host is controlled by config\n'
+            printf '    command: uvicorn webui:app --host %s --port %s\n' "$command_host" "$first_port"
+        fi
+        if [ "${#volumes[@]}" -gt 0 ]; then
+            printf '    # Bind mounts and named volumes from runtime config\n'
+            printf '    volumes:\n'
+            for item in "${volumes[@]}"; do
+                compose_volume="$item"
+                if [[ "$compose_volume" == %h/* ]]; then
+                    compose_volume="${HOME}/${compose_volume#%h/}"
+                fi
+                printf '      - %s\n' "$compose_volume"
+            done
+        fi
+        if [ "${#caps[@]}" -gt 0 ]; then
+            printf '    # Linux capabilities from *_CAPABILITIES in config.conf\n'
+            printf '    cap_add:\n'
+            for item in "${caps[@]}"; do printf '      - %s\n' "$item"; done
+        fi
+        if [ "${#devices[@]}" -gt 0 ]; then
+            printf '    # Device mappings from *_DEVICES in config.conf\n'
+            printf '    devices:\n'
+            for item in "${devices[@]}"; do printf '      - %s\n' "$item"; done
+        fi
+        printf '    restart: always\n'
+        if [ "${#named_volumes[@]}" -gt 0 ]; then
+            printf '\n# Named volumes derived from *_VOLUMES sources\n'
+            printf '\nvolumes:\n'
+            for item in "${named_volumes[@]}"; do printf '  %s: {}\n' "$item"; done
+        fi
+    } > "$compose_file"
+    echo "  Written: $compose_file"
+
+    {
+        printf '# Generated by config.sh for %s\n' "$PROJECT_NAME"
+        printf '# Edit config.conf, then run ./config.sh again.\n'
+        printf '\n'
+        printf '[Container]\n'
+        printf 'ContainerName=%s\n' "$CONTAINER_NAME"
+        printf '# Container image from config or existing generated file\n'
+        printf 'Image=%s\n' "$image"
+        if [ -f "$CONFIG_FILE" ] || [ -f "$ENV_FILE" ]; then
+            printf '# Runtime configuration files generated from *example files\n'
+        fi
+        [ -f "$CONFIG_FILE" ] && printf 'EnvironmentFile=%s\n' "$CONFIG_FILE"
+        [ -f "$ENV_FILE" ] && printf 'EnvironmentFile=%s\n' "$ENV_FILE"
+        for item in "${persistent_envs[@]}"; do printf 'Environment=%s\n' "$item"; done
+        [ "${#ports[@]}" -gt 0 ] && printf '# Port mappings: publish host:PUBLISH_PORT:PORT from config.conf/container.conf\n'
+        for item in "${ports[@]}"; do printf 'PublishPort=%s\n' "$item"; done
+        if [ -f "$DIR/webui.py" ] && [ "$command_mode" = auto ]; then
+            printf '# Container-internal bind address; published host is controlled by config\n'
+            printf 'Exec=uvicorn webui:app --host %s --port %s\n' "$command_host" "$first_port"
+        fi
+        [ "${#volumes[@]}" -gt 0 ] && printf '# Bind mounts and named volumes from runtime config\n'
+        for item in "${volumes[@]}"; do printf 'Volume=%s\n' "$item"; done
+        for item in "${commented_volumes[@]}"; do
+            [[ " ${volumes[*]} " == *" $item "* ]] || printf '#Volume=%s\n' "$item"
+        done
+        [ "${#caps[@]}" -gt 0 ] && printf '# Linux capabilities from *_CAPABILITIES in config.conf\n'
+        for item in "${caps[@]}"; do printf 'AddCapability=%s\n' "$item"; done
+        [ "${#devices[@]}" -gt 0 ] && printf '# Device mappings from *_DEVICES in config.conf\n'
+        for item in "${devices[@]}"; do printf 'AddDevice=%s\n' "$item"; done
+        for item in "${additional_lines[@]}"; do printf '%s\n' "$item"; done
+        if $registry_autoupdate; then printf 'AutoUpdate=registry\n'; fi
+        printf '\n'
+        printf '[Service]\n'
+        printf 'Restart=always\n'
+        printf 'TimeoutStartSec=30\n\n'
+        printf '[Install]\n'
+        printf 'WantedBy=default.target\n'
+    } > "$quadlet_file"
+    echo "  Written: $quadlet_file"
+}
+
+echo ""
+echo "  Configuring $PROJECT_NAME"
+
+configure_container_name
+prepare_db_auto_migration
+if $RENDER_CONTAINER_ONLY; then
+    [ "$NO_CONTAINER" != "true" ] || {
+        echo "--render-container cannot be combined with --no-container" >&2
+        exit 2
+    }
+    reconcile_db_auto_config
+    generate_container_files
+    echo ""
+    exit 0
+fi
+if $CONTAINER_NAME_MODE; then
+    touch "$CONFIG_FILE"
+    write_config_value "$CONFIG_FILE" CONTAINER_NAME "$CONTAINER_NAME"
+fi
+
+if ! $FEDORA_CUMULATIVE_EXAMPLES; then
+    for example in "$DIR"/*build.conf_example; do configure_from_example "$example" "$BUILD_FILE" "$(basename "$BUILD_FILE")"; done
+fi
+[ -z "$ENV_EXAMPLE" ] || configure_from_example "$ENV_EXAMPLE" "$ENV_FILE" "$(basename "$ENV_FILE")"
+reconcile_db_auto_config
+[ -z "$CONFIG_EXAMPLE" ] || configure_from_example "$CONFIG_EXAMPLE" "$CONFIG_FILE" "$(basename "$CONFIG_FILE")"
+if [ "$NO_CONTAINER" != "true" ]; then
+    touch "$CONTAINER_FILE"
+    [ -z "$CONTAINER_EXAMPLE" ] || configure_from_example "$CONTAINER_EXAMPLE" "$CONTAINER_FILE" "$(basename "$CONTAINER_FILE")"
+    initialize_sqlite_persistence
+    generate_container_files
+else
+    initialize_sqlite_persistence
+fi
+
+echo ""

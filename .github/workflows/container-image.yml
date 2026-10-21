@@ -1,0 +1,147 @@
+# Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
+name: MCP Switcher test and publish
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: mcp-switcher-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: switcher
+        ports: ['5432:5432']
+        options: --health-cmd="pg_isready -U postgres" --health-interval=5s --health-timeout=5s --health-retries=12
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: test-password
+          MARIADB_DATABASE: switcher
+        ports: ['3306:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned dependencies
+        run: python -m pip install '.[test]'
+      - name: Check dependency compatibility and source
+        run: |
+          python -m pip check
+          ruff check src tests .github/scripts
+          bash -n config.sh optional_persistence.sh
+          node --check src/mcp_switcher/static/app.js
+      - name: Test all database backends, authentication and MCP
+        env:
+          TEST_POSTGRES_URL: postgresql+psycopg://postgres:test-password@localhost:5432/switcher
+          TEST_MARIADB_URL: mysql+pymysql://root:test-password@127.0.0.1:3306/switcher
+        run: |
+          python -m pytest -q --junitxml=pytest-results.xml
+          node --test tests/*.test.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: pytest-results.xml
+  build-test-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      IMAGE_NAME: ghcr.io/f24sales/litellm-mcp-switcher-safrano9999
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Resolve package version
+        id: release
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          [[ "$version" =~ ^[0-9]{4}\.[0-9]{1,2}\.[1-9][0-9]*$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build candidate on the GitHub runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          pull: true
+          load: true
+          push: false
+          tags: mcp-switcher-candidate:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/f24sales/litellm-mcp-switcher
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            io.safrano9999.build.commit=${{ github.sha }}
+      - name: Test Alpine listeners, switches, restart and persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          volume="mcp-switcher-smoke-${GITHUB_RUN_ID}"
+          docker volume create "$volume" >/dev/null
+          container=""
+          trap 'if [ -n "$container" ]; then docker rm -f "$container" >/dev/null; fi; docker volume rm "$volume" >/dev/null' EXIT
+          for mode in both web mcp; do
+            web=1; mcp=1
+            if [ "$mode" = web ]; then mcp=0; fi
+            if [ "$mode" = mcp ]; then web=0; fi
+            container=$(docker run --pull=never -d --network none --read-only --tmpfs /tmp \
+              -v "$volume:/opt/f24sales/litellm-mcp-switcher/sqlite" \
+              -e LITELLM_ADMIN_VIRTUAL_KEY=ci-admin-00000000000000000000000000000000 \
+              -e USER_NAME=ci-user \
+              -e USER_SWITCHER_BEARER=ci-switcher-00000000000000000000000000000000 \
+              -e USER_LITELLM_BEARER=ci-litellm-00000000000000000000000000000000 \
+              -e WEBUI_ENABLED="$web" -e MCP_ENABLED="$mcp" "mcp-switcher-candidate:${GITHUB_SHA}")
+            docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
+            # docker cp cannot write a read-only root; /tmp is a dedicated writable tmpfs.
+            docker exec "$container" python3 /tmp/smoke.py
+            docker exec -i "$container" python3 - <<'PY'
+          import sqlite3
+          c=sqlite3.connect('/opt/f24sales/litellm-mcp-switcher/sqlite/switcher.sqlite3')
+          c.execute('CREATE TABLE IF NOT EXISTS smoke_persistence (value TEXT)')
+          c.execute('INSERT INTO smoke_persistence VALUES (?)', ('survives',))
+          c.commit()
+          PY
+            docker restart "$container" >/dev/null
+            docker cp .github/scripts/smoke.py "$container:/tmp/smoke.py"
+            docker exec "$container" python3 /tmp/smoke.py
+            docker exec "$container" python3 -c "import sqlite3; c=sqlite3.connect('/opt/f24sales/litellm-mcp-switcher/sqlite/switcher.sqlite3'); assert c.execute('SELECT COUNT(*) FROM smoke_persistence').fetchone()[0]>0"
+            docker stop --time 20 "$container" >/dev/null
+            [ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ]
+            docker rm "$container" >/dev/null; container=""
+          done
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish the tested candidate
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker tag "mcp-switcher-candidate:${GITHUB_SHA}" "$IMAGE_NAME:$RELEASE_VERSION"
+          docker tag "mcp-switcher-candidate:${GITHUB_SHA}" "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:$RELEASE_VERSION"
+          docker push "$IMAGE_NAME:latest"

@@ -1,0 +1,4 @@
+[Volume]
+VolumeName=litellm-mcp-switcher-sqlite
+UID=10001
+GID=10001

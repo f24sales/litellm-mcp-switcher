@@ -1,0 +1,9 @@
+# Example HTTPS frontend. Match your installation's existing port allocation.
+https://your-host.example:2013 {
+    handle /mcp* {
+        reverse_proxy litellm-mcp-switcher:8000
+    }
+    handle {
+        reverse_proxy litellm-mcp-switcher:8080
+    }
+}

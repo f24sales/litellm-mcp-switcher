@@ -1,0 +1,16 @@
+.env
+*.env
+config.conf
+container.conf
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+*.db
+*.sqlite*
+
+docker-compose.yml
+litellm-mcp-switcher.container

@@ -1,0 +1,139 @@
+"""The single authorization and selection layer for REST, WebUI and MCP."""
+import asyncio
+import hashlib
+import json
+import time
+
+from .models import Problem, Selection
+from .litellm import intersect
+
+
+def revision(ceiling, active):
+    value = {"ceiling": ceiling.model_dump(), "active": active.model_dump()}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+class Service:
+    def __init__(self, db, upstream, users, settings):
+        self.db, self.upstream, self.settings = db, upstream, settings
+        self.users = {u.name: u for u in users if not u.admin}
+        self.discovery_limit = asyncio.Semaphore(3)
+        self.discovery = {}
+
+    def target(self, actor, name=None):
+        if actor.admin:
+            if not name or name not in self.users:
+                raise Problem(404, "Choose a configured user")
+            return self.users[name]
+        if name is not None and name != actor.name:
+            raise Problem(403, "This identity cannot manage another user")
+        return actor
+
+    async def snapshot(self, actor, name=None):
+        target = self.target(actor, name)
+        inventory = await self.upstream.inventory()
+        info, team, ceiling, active = await self.upstream.scope(target, inventory)
+        return target, inventory, info, team, ceiling, active
+
+    async def reconcile(self, target, ceiling, active):
+        operation = self.db.operation(target.name)
+        if operation["status"] not in {"pending", "uncertain"}:
+            return operation
+        if operation["status"] == "pending" and operation["expires"] > time.time():
+            return operation
+        expected = operation["target"]
+        observed = ceiling if operation["kind"] == "ceiling" else active
+        if observed.model_dump() == expected:
+            self.db.finish(target.name, operation["id"], "verified", "Upstream result verified by reconciliation")
+        else:
+            self.db.finish(target.name, operation["id"], "conflict", "Upstream state differs; review before applying")
+        return self.db.operation(target.name)
+
+    async def state(self, actor, name=None):
+        target, inventory, _, _, ceiling, active = await self.snapshot(actor, name)
+        operation = await self.reconcile(target, ceiling, active)
+        visible = inventory if actor.admin else [s for s in inventory if s["server_id"] in ceiling.servers]
+        return {"user": target.name, "admin": actor.admin, "servers": visible,
+                "ceiling": ceiling.model_dump(), "active": active.model_dump(),
+                "revision": revision(ceiling, active), "projects": self.db.list_projects(target.name),
+                "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
+                "refresh_seconds": self.settings.webui_refresh_seconds}
+
+    async def tools(self, actor, server_id, name=None, refresh=False):
+        _, inventory, _, _, ceiling, _ = await self.snapshot(actor, name)
+        if server_id not in {s["server_id"] for s in inventory} or (
+                not actor.admin and server_id not in ceiling.servers):
+            raise Problem(403, "Server is outside this user's administrative access")
+        async with self.discovery_limit:
+            entry = self.discovery.get(server_id)
+            if refresh or not entry or time.monotonic() - entry[0] > 60:
+                try:
+                    tools = await self.upstream.tools(server_id)
+                    entry = (time.monotonic(), {"status": "reachable", "tools": tools})
+                except Problem:
+                    entry = (time.monotonic(), {"status": "error", "tools": [],
+                             "message": "Tool discovery failed; saved access has been preserved"})
+                self.discovery[server_id] = entry
+        result = dict(entry[1])
+        if not actor.admin and ceiling.servers[server_id] is not None:
+            result["tools"] = [t for t in result["tools"] if t["name"] in ceiling.servers[server_id]]
+        return result
+
+    async def validate(self, actor, selection, ceiling, inventory, name=None):
+        if not set(selection.servers) <= {s["server_id"] for s in inventory}:
+            raise Problem(422, "Selection contains a server missing from the current registry")
+        if not actor.admin and intersect(selection, ceiling) != selection:
+            raise Problem(403, "Selection exceeds the administrative access")
+        for server_id, tools in selection.servers.items():
+            if tools is not None:
+                # An already valid explicit subset may be saved during an outage.
+                upper = ceiling.servers.get(server_id)
+                if not actor.admin and upper is not None and set(tools) <= set(upper):
+                    continue
+                catalog = await self.tools(actor, server_id, name)
+                if catalog["status"] != "reachable":
+                    raise Problem(409, "Discover the server's tools successfully before changing its tool subset")
+                if not set(tools) <= {t["name"] for t in catalog["tools"]}:
+                    raise Problem(422, "Selection contains an unknown tool")
+
+    async def save_project(self, actor, data, project_id=None):
+        if actor.admin:
+            raise Problem(403, "Use a user identity to manage projects")
+        _, inventory, _, _, ceiling, _ = await self.snapshot(actor)
+        await self.validate(actor, data.selection, ceiling, inventory)
+        return self.db.save_project(actor.name, data, project_id)
+
+    def delete_project(self, actor, project_id, version):
+        if actor.admin:
+            raise Problem(403, "Use a user identity to manage projects")
+        self.db.delete_project(actor.name, project_id, version)
+        return {"deleted": True}
+
+    async def apply(self, actor, data, name=None, ceiling_change=False):
+        if ceiling_change and not actor.admin:
+            raise Problem(403, "Administrative access required")
+        target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)
+        if revision(ceiling, active) != data.revision:
+            raise Problem(409, "Access changed since your last refresh; review the current state")
+        await self.validate(actor, data.selection, ceiling, inventory, name)
+        if not ceiling_change and intersect(data.selection, ceiling) != data.selection:
+            raise Problem(403, "Selection exceeds the administrative access")
+        kind = "ceiling" if ceiling_change else "active"
+        with self.db.lease(target.name, kind, data.selection.model_dump()) as operation_id:
+            # Re-read after acquiring the cross-request lease.
+            _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
+            if revision(upper, current) != data.revision:
+                self.db.finish(target.name, operation_id, "conflict", "Access changed before the update")
+                raise Problem(409, "Access changed before the update")
+            if ceiling_change:
+                # Team is authoritative immediately, including during a partial failure.
+                await self.upstream.write_team(fresh_team, data.selection)
+                await self.upstream.write_key(target, fresh_info, intersect(current, data.selection))
+            else:
+                await self.upstream.write_key(target, fresh_info, data.selection)
+            _, _, _, _, actual_upper, actual = await self.snapshot(actor, name)
+            observed = actual_upper if ceiling_change else actual
+            if observed != data.selection:
+                raise Problem(502, "LiteLLM did not confirm the requested permissions; reconcile before retrying")
+            self.db.finish(target.name, operation_id, "verified", "Permissions verified in LiteLLM")
+        return await self.state(actor, name)

@@ -1,0 +1,14 @@
+#container-command: image
+CONTAINER_NAME=litellm-mcp-switcher
+IMAGE=ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
+
+# Leave blank to disable host publication; internal enablement is separate
+#container-port: WEBUI_PUBLISH_PORT 8080
+WEBUI_PUBLISH_PORT=8080
+
+#container-port: MCP_PUBLISH_PORT 8000
+MCP_PUBLISH_PORT=8000
+
+#repeat-group: ADDITIONAL_LINE suffix02 ADDITIONAL_LINE
+#repeat-freeform: ADDITIONAL_LINE
+ADDITIONAL_LINE=

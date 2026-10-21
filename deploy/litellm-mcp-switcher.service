@@ -1,0 +1,25 @@
+[Unit]
+Description=LiteLLM MCP Switcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcp-switcher
+Group=mcp-switcher
+WorkingDirectory=/etc/litellm-mcp-switcher
+EnvironmentFile=/etc/litellm-mcp-switcher/config.conf
+EnvironmentFile=/etc/litellm-mcp-switcher/.env
+ExecStart=/usr/local/bin/litellm-mcp-switcher
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=25
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/f24sales/litellm-mcp-switcher/sqlite
+
+[Install]
+WantedBy=multi-user.target

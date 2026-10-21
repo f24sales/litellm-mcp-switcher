@@ -1,0 +1,11 @@
+.git
+.env
+*.env
+config.conf
+container.conf
+__pycache__
+.pytest_cache
+.ruff_cache
+*.egg-info
+*.db
+*.sqlite*
