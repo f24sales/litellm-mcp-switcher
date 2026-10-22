@@ -9,7 +9,8 @@ ADD --checksum=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8
 FROM docker.io/library/alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6 AS builder
 RUN apk add --no-cache python3 py3-pip python3-dev build-base libffi-dev openssl-dev cargo rust
 RUN --mount=type=bind,from=python-trust,target=/tmp/python-trust \
-    python3 -m pip install --break-system-packages --no-index --upgrade /tmp/python-trust/*.whl \
+    python3 -c "import ensurepip, pathlib, shutil, sysconfig; seed = pathlib.Path(sysconfig.get_config_var('WHEEL_PKG_DIR') or pathlib.Path(ensurepip.__file__).with_name('_bundled')); [p.unlink() for p in seed.glob('pip-*.whl')]; shutil.copy('/tmp/python-trust/pip-26.2.2-py3-none-any.whl', seed); assert ensurepip.version() == '26.2.2'" \
+    && PYTHONPATH=/tmp/python-trust/pip-26.2.2-py3-none-any.whl python3 -m pip install --break-system-packages --no-index --upgrade /tmp/python-trust/*.whl \
     && python3 -c "import pip, certifi, pip._vendor.certifi as bundled; assert pip.__version__ == '26.2.2'; assert certifi.__version__ == '2026.10.19'; assert bundled.__version__ == '2026.10.19'"
 WORKDIR /source
 COPY pyproject.toml ./
@@ -22,7 +23,8 @@ RUN apk add --no-cache python3 py3-pip libpq ca-certificates libstdc++ \
     && mkdir -p /opt/f24sales/litellm-mcp-switcher/sqlite /etc/litellm-mcp-switcher \
     && chown -R switcher:switcher /opt/f24sales/litellm-mcp-switcher /etc/litellm-mcp-switcher
 RUN --mount=type=bind,from=python-trust,target=/tmp/python-trust \
-    python3 -m pip install --break-system-packages --no-index --upgrade /tmp/python-trust/*.whl \
+    python3 -c "import ensurepip, pathlib, shutil, sysconfig; seed = pathlib.Path(sysconfig.get_config_var('WHEEL_PKG_DIR') or pathlib.Path(ensurepip.__file__).with_name('_bundled')); [p.unlink() for p in seed.glob('pip-*.whl')]; shutil.copy('/tmp/python-trust/pip-26.2.2-py3-none-any.whl', seed); assert ensurepip.version() == '26.2.2'" \
+    && PYTHONPATH=/tmp/python-trust/pip-26.2.2-py3-none-any.whl python3 -m pip install --break-system-packages --no-index --upgrade /tmp/python-trust/*.whl \
     && python3 -c "import pip, certifi, pip._vendor.certifi as bundled; assert pip.__version__ == '26.2.2'; assert certifi.__version__ == '2026.10.19'; assert bundled.__version__ == '2026.10.19'"
 COPY --from=builder /wheels /wheels
 RUN python3 -m pip install --break-system-packages --no-index --find-links=/wheels litellm-mcp-switcher \
