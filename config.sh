@@ -1298,6 +1298,8 @@ configure_from_example() {
     local field_podman_host_internal=false podman_host_internal_ip=""
     local telegram_token_key="" telegram_existing=""
     local generator_label choice
+    local pending_create="" field_create="" create_labels="" create_enter=""
+    local -a create_command=()
     local field_choice_count=0 field_choice_index=0 field_choice_total=0
     local field_choice_default="" field_choice_numbers=""
     local field_choice_freeform=false field_choice_selected_freeform=false
@@ -1856,6 +1858,13 @@ configure_from_example() {
 
     while IFS= read -r line <&3; do
         stripped="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$stripped" == \#create-with:* ]]; then
+            pending_create="$(trim "${stripped#\#create-with:}")"
+            [[ "$pending_create" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*\.py$ ]] || {
+                echo "Invalid create-with script name" >&2; return 1;
+            }
+            continue
+        fi
         if [[ "$stripped" == \#choices:* ]]; then
             pending_choices="$(trim "${stripped#\#choices:}")"
             continue
@@ -1893,6 +1902,7 @@ configure_from_example() {
             continue
         fi
         if [[ -z "$stripped" ]]; then
+            pending_create=""
             required_next=false
             secret_next=false
             pending_choices=""
@@ -1907,6 +1917,8 @@ configure_from_example() {
             continue
         fi
         required="$required_next"
+        field_create="$pending_create"
+        pending_create=""
         secret="$secret_next"
         field_choices="$pending_choices"
         field_when="$pending_when"
@@ -2110,7 +2122,29 @@ configure_from_example() {
             continue
         fi
 
+        create_labels=""
+        create_command=(python3 "$SCRIPT_DIR/$field_create" --env-file "$ENV_FILE" --config-file "$CONFIG_FILE" --key "$key")
+        if [ -n "$field_create" ] && [ -t 0 ] && [ -f "$SCRIPT_DIR/$field_create" ]; then
+            create_labels="$("${create_command[@]}" check)" || create_labels=""
+        fi
         while :; do
+            if [ -n "$create_labels" ]; then
+                IFS='|' read -r create_enter generator_label <<< "$create_labels"
+                printf '    %s:\n      (1) %s\n      (2) %s\n' "$key" "$create_enter" "$generator_label"
+                read -r -p "    Choose [1/2] (default: 1): " choice || return 130
+                case "${choice:-1}" in
+                    1) ;;
+                    2)
+                        val="$("${create_command[@]}" create)" || return 1
+                        [[ -n "$val" && "$val" != *$'\n'* && "$val" != *$'\r'* ]] || {
+                            echo "    Creator returned an invalid value" >&2; return 1;
+                        }
+                        used_prefill=false
+                        echo "    $key= created"
+                        break ;;
+                    *) echo "    choose 1 or 2"; continue ;;
+                esac
+            fi
             if [ "$publish_port_autofill" = "true" ] && [[ "$key" == *_PUBLISH_PORT ]]; then
                 val="$default"
                 used_prefill=true

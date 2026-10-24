@@ -28,12 +28,21 @@ class FakeAPI:
             self.teams[name] = {"team_id": name, "object_permission": copy.deepcopy(op)}
         self.fail_write, self.uncertain_write, self.fail_tools = False, False, False
         self.writes = []
+        self.notifications = []
 
     def response(self, request):
         path = request.url.path
         body = json.loads(request.content) if request.content else {}
         if path == "/v1/mcp/server":
             return httpx.Response(200, json=self.registry)
+        if path == "/mcp/notify-tools-changed":
+            key = request.headers["Authorization"].removeprefix("Bearer ")
+            if key not in self.keys:
+                return httpx.Response(403, json={})
+            self.notifications.append(key)
+            return httpx.Response(200, json={"notification": "notifications/tools/list_changed",
+                                           "notified_connections": 2, "permissions_changed": False,
+                                           "client_refresh_required": True})
         if path == "/key/info":
             return httpx.Response(200, json={"info": self.keys[request.headers["Authorization"].removeprefix("Bearer ")]})
         if path == "/team/info":

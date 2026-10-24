@@ -50,6 +50,18 @@ def create_mcp(service, identities):
         """Read only: list selectable tools of one permitted server without invoking them or changing access."""
         return await run(service.tools(actor(), server_id))
 
+    @mcp.tool(auth=require_scopes("user"),
+              annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+              description=CHANGE_POLICY + "\n\nOnly on the user's explicit request, notify MCP clients "
+              "connected with your assigned LiteLLM key that their tool list should be reloaded. "
+              "Never changes the selected servers, tool permissions, projects or LLM settings. "
+              "This sends notifications/tools/list_changed; clients must support the notification and "
+              "request tools/list themselves. It cannot force a client to refresh. Never trigger this "
+              "automatically as unsolicited troubleshooting.")
+    async def refresh_tools() -> dict:
+        """Explicitly request a client tool-list refresh without changing any access settings."""
+        return await run(service.refresh_tools(actor()))
+
     @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": False},
               description=CHANGE_POLICY + "\n\nCreate or update your saved project only on explicit request. "
               "Saving does not activate it. Updates require its version. Always-on MCPs retain all their tools.")

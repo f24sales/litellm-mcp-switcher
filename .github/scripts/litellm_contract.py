@@ -16,7 +16,44 @@ from mcp_switcher.config import Identity, Settings
 from mcp_switcher.db import Database
 from mcp_switcher.litellm import LiteLLM
 from mcp_switcher.mcp import create_mcp
+from mcp_switcher.provision import ProvisionError, Provisioner
 from mcp_switcher.service import Service
+
+
+async def provision_contract(req, master, sid):
+    """Exercise the setup helper against LiteLLM, without production credentials."""
+    values = {"LITELLM_API_BASE_URL": "http://127.0.0.1:4000", "LITELLM_MASTER_KEY": master,
+              "USER_NAME_02": "setup-contract", "USER_SWITCHER_BEARER_02": "s" * 64,
+              "USER_ALLOWED_MCPS_02": "contract"}
+    helper = Provisioner(values, "USER_LITELLM_BEARER_02")
+    try:
+        permission = await asyncio.to_thread(helper.check)
+        assert permission["mcp_servers"] == [sid]
+        key = await asyncio.to_thread(helper.create)
+        settings = Settings(litellm_admin_virtual_key=SecretStr(master),
+                            litellm_api_base_url=values["LITELLM_API_BASE_URL"])
+        upstream = LiteLLM(settings)
+        try:
+            identity = Identity("setup-contract", "s" * 64, key)
+            info, team, ceiling, active = await upstream.scope(identity, await upstream.inventory())
+            assert info["team_id"] == team["team_id"] == helper.team_id
+            assert ceiling.servers == active.servers == {sid: None}
+            assert info["models"] == ["no-default-models"]
+        finally:
+            await upstream.close()
+        tools = await req("GET", "/mcp-rest/tools/list?server_id=" + sid, key=key)
+        assert {t["name"] for t in tools["tools"]} == {"read", "write"}
+        await req("POST", "/v1/chat/completions", {"model": "none", "messages": []}, key=key, expected=403)
+        try:
+            await asyncio.to_thread(helper.create)
+        except ProvisionError as error:
+            assert "already has a key" in str(error)
+        else:
+            raise AssertionError("Repeated setup must not create a second key")
+        assert len((await req("GET", "/team/info?team_id=" + helper.team_id))["keys"]) == 1
+    finally:
+        helper.client.close()
+    print("Setup contract: dedicated team, exact MCP ceiling, callable MCP-only key, repeat protection passed")
 
 
 async def always_on_contract(req, master, key, optional_id):
@@ -66,7 +103,7 @@ async def always_on_contract(req, master, key, optional_id):
                 assert state["operation"]["status"] == "verified"
                 tools = await req("GET", "/mcp-rest/tools/list?server_id=" + control_id, key=key)
                 assert {t["name"] for t in tools["tools"]} == {
-                    "current_state", "discover_tools", "save_project", "delete_project", "apply_selection"}
+                    "current_state", "discover_tools", "refresh_tools", "save_project", "delete_project", "apply_selection"}
                 for tool in tools["tools"]:
                     if tool["name"] in {"save_project", "delete_project", "apply_selection"}:
                         assert "USER AUTHORIZATION REQUIRED" in tool["description"]
@@ -120,6 +157,7 @@ async def main():
             "url": "http://127.0.0.1:8999/mcp", "transport": "http", "allow_all_keys": False,
             "available_on_public_internet": False}, expected=(200, 201))
         sid = registered["server_id"]
+        await provision_contract(req, master, sid)
         await req("POST", "/team/new", {"team_id": "contract", "object_permission": {"mcp_servers": [sid]}})
         result = await req("POST", "/key/generate", {"team_id": "contract", "models": ["no-default-models"],
             "allowed_routes": ["mcp_inference_routes"], "object_permission": {"mcp_servers": [sid]}})

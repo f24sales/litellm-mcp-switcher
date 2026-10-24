@@ -18,7 +18,7 @@ COPY src ./src
 RUN python3 -m pip wheel --wheel-dir=/wheels .
 
 FROM docker.io/library/alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6
-RUN apk add --no-cache python3 py3-pip libpq ca-certificates libstdc++ \
+RUN apk add --no-cache python3 py3-pip libpq ca-certificates libstdc++ bash openssl \
     && addgroup -g 10001 switcher && adduser -D -u 10001 -G switcher switcher \
     && mkdir -p /opt/f24sales/litellm-mcp-switcher/sqlite /etc/litellm-mcp-switcher \
     && chown -R switcher:switcher /opt/f24sales/litellm-mcp-switcher /etc/litellm-mcp-switcher
@@ -30,6 +30,8 @@ COPY --from=builder /wheels /wheels
 RUN python3 -m pip install --break-system-packages --no-index --find-links=/wheels litellm-mcp-switcher \
     && python3 -c "import ensurepip, pip, certifi, pip._vendor.certifi as bundled; assert ensurepip.version() == '26.2.2'; assert pip.__version__ == '26.2.2'; assert certifi.__version__ == '2026.10.19'; assert bundled.__version__ == '2026.10.19'" \
     && rm -rf /wheels /root/.cache
+COPY litellm_add_virtual.py /usr/local/bin/litellm_add_virtual.py
+COPY --chown=switcher:switcher config.sh env.example config.conf_example container.example optional_persistence.sh litellm_add_virtual.py /opt/f24sales/litellm-mcp-switcher/
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER switcher
 WORKDIR /etc/litellm-mcp-switcher

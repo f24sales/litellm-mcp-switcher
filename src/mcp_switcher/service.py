@@ -36,6 +36,11 @@ class Service:
         info, team, ceiling, active = await self.upstream.scope(target, inventory)
         return target, inventory, info, team, ceiling, active
 
+    async def refresh_tools(self, actor):
+        target = self.target(actor)
+        result = await self.upstream.refresh_tools(target)
+        return {"user": target.name, **result}
+
     def always_on(self, target, inventory):
         servers = {}
         for alias in target.always_on_mcps:

@@ -1,119 +1,259 @@
 # LiteLLM MCP Switcher
 
-A small workspace for choosing MCP servers and tools available through an existing **LiteLLM MCP key**. Save selections as projects, then activate a complete selection with one action.
+Choose which MCP servers and tools an AI client can use through **one LiteLLM MCP connection**. Save selections as projects and switch between them from a Web UI, REST API, or MCP tools in the conversation.
 
-Web UI, REST API and MCP tools share one authorization and application layer. LiteLLM executes upstream tools and retains their credentials. The Switcher manages access and projects; it does not proxy upstream tool calls or manage LLM models.
+For example, a user can start with Vikunja, switch to Paperless, and later enable MailFathom and Thunderbird. The client keeps the same LiteLLM URL and key. A permanently enabled Switcher alias keeps the selection tools available throughout those changes.
 
-## Architecture
+LiteLLM connects to the upstream servers and executes their tools. The Switcher updates the user's MCP permissions through LiteLLM's API and stores saved projects. Each component has a separate job:
 
-```text
-User Switcher bearer ──┬── Web UI / REST :8080 ──┐
-                       └── FastMCP :8000/mcp ───┤
-                                              ├── project database
-Admin virtual key ─────── administrative tools ─┤
-                                              └── LiteLLM management API
-                                                    │
-User LiteLLM MCP bearer ─────────────────────── LiteLLM MCP
-                                                    │
-                                           upstream MCP servers
+| Component | Responsibility |
+|---|---|
+| LiteLLM | MCP registry, upstream credentials, tool aggregation, and enforcement of MCP access |
+| Switcher | Per-user server/tool selection, administrative access limits, and saved projects |
+| MCP client | Displaying tools, choosing calls, and reloading its tool catalog after changes |
+| Upstream MCP servers | Executing their own operations with the credentials registered in LiteLLM |
+
+The Switcher does not route LLM requests or change model settings. Give it dedicated MCP keys, separate from existing LLM keys.
+
+## How one connection works
+
+```mermaid
+flowchart LR
+    Client[AI client] -->|User LiteLLM MCP bearer|Gateway[LiteLLM MCP endpoint]
+    Gateway -->|Selected aliases and upstream credentials|Servers[Upstream MCP servers]
+    Gateway -->|Always-on alias and user Switcher bearer|Switcher[LiteLLM MCP Switcher]
+    Browser[Web UI or REST client] -->|User Switcher bearer|Switcher
+    Switcher -->|Admin virtual key: management API|Gateway
+    Switcher --> Database[(Saved projects)]
 ```
 
-The Python application runs directly under systemd or in an Alpine 3.24.1 image. FastMCP supplies Streamable HTTP; Supergateway and Node.js are not required at runtime.
+The Switcher remains a separate service. Registering it as an upstream alias makes its control tools part of the tool catalog returned by LiteLLM, alongside the selected application tools. The AI client needs only the **LiteLLM `/mcp` endpoint** for this arrangement.
 
-## Three credentials
+Connecting directly to the **Switcher `/mcp` endpoint** exposes the selection and project tools only. It does not expose the selected upstream tools. This distinction matters when a client allows only one connector: use the LiteLLM endpoint and include the Switcher as an always-on alias.
 
-| Credential | Purpose |
+## Allowed access, active selection, and projects
+
+These are three different things:
+
+| Concept | Who controls it? | What does it mean? |
+|---|---|---|
+| Administrative ceiling | Administrator | The largest set of servers and tools this user may select |
+| Active selection | User, within that ceiling | The servers and tools currently enabled for the assigned LiteLLM key |
+| Saved project | User | A named selection that can be applied later |
+
+The ceiling is stored in a dedicated LiteLLM team's explicit MCP permissions. The active selection is stored in that team's single key. Every configured user needs a **unique team containing exactly one dedicated MCP key**. The Switcher rejects additive MCP access groups/toolsets in managed scopes so they cannot silently expand this model.
+
+Suppose Rafael is allowed Vikunja, Paperless, MailFathom, Thunderbird, and his always-on Switcher:
+
+| Action | Active tools afterward |
 |---|---|
-| `LITELLM_ADMIN_VIRTUAL_KEY` | Administrative Switcher login and backend LiteLLM management. Use a dedicated management key, never the master key. |
-| `USER_SWITCHER_BEARER` | This user's Switcher Web UI, REST and MCP login. |
-| `USER_LITELLM_BEARER` | The user's assigned LiteLLM MCP key, used directly at LiteLLM. |
+| Apply a task-management selection | Switcher + Vikunja |
+| Save a project named “Documents” containing Paperless | Still Switcher + Vikunja; saving does not apply it |
+| Apply “Documents” | Switcher + Paperless |
+| Apply MailFathom and Thunderbird | Switcher + MailFathom + Thunderbird |
+| Disable all optional servers | Switcher only |
 
-A server-side configuration group binds one Switcher identity to one LiteLLM key. Requests cannot choose a different key. Every user needs a unique dedicated LiteLLM MCP team containing exactly one key; the team's explicit MCP permissions are the administrative ceiling. The key's MCP permissions are the active selection. Neither credential is an existing LLM key.
+Applying a selection **replaces the complete active selection**. It affects every client using that LiteLLM key. Projects are presets, not independent sessions, keys, or upstream credentials. Use separate configured keys when simultaneous workspaces need different active selections. Deleting a saved project leaves active access unchanged.
 
-The Switcher rejects additive MCP access groups/toolsets in managed scopes rather than silently weakening the ceiling. Register each distinct upstream URL/credential pair as a separate LiteLLM MCP alias. The registry is discovered dynamically; no server or tool names are hardcoded.
+An administrator can allow all tools from a server or a specific subset. The user can narrow that allowance further, but cannot expand it. A read-only selection means explicitly choosing appropriate upstream tools; there is no universal read-only transformation for arbitrary MCP tools. The upstream bearer still determines which account and permissions those calls have.
 
-## Configure
+## Three credentials and their roles
 
-Copy `env.example` to `.env` and `config.conf_example` to `config.conf`. Both real files are git-ignored. Generate opaque Switcher tokens using a cryptographically secure generator, for example `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`, and put them directly into your private configuration.
+For a deployment with one user, there are three distinct credentials:
 
-Alternatively run `./config.sh` to use the existing New/Skip configuration flow and generate Compose/Quadlet files. `config.sh` and `optional_persistence.sh` are shared convention snapshots from `safrano9999/SCRIPTS/safrano9999/config`; use those sources for future synchronization. Configuration rendering never authorizes a local build or pull.
+| Configuration variable | Where is it used? | Authority |
+|---|---|---|
+| `LITELLM_ADMIN_VIRTUAL_KEY` | Switcher backend → LiteLLM management API; also administrative login to the Switcher | Inspect and update managed users' MCP ceilings and selections |
+| `USER_SWITCHER_BEARER` | User → Switcher Web UI, REST API, or MCP endpoint | Manage only this configured user's selection and projects |
+| `USER_LITELLM_BEARER` | User's AI client → LiteLLM MCP endpoint | Invoke the upstream tools enabled for the assigned key |
 
-User repeat group:
+Use a dedicated management virtual key, never LiteLLM's master key. The administrator credential is shared by the Switcher backend; each additional user gets their own Switcher/LiteLLM bearer pair.
+
+The server-side configuration binds a Switcher login to its assigned LiteLLM key. A user request cannot supply a different target key or manage another user's projects. Management credentials, user key values, and upstream registry credentials are never returned in state or discovery responses. The project database stores no bearer tokens.
+
+### Upstream identities are separate aliases
+
+Import upstream servers into LiteLLM before selecting them. Register **each URL/credential pair as its own alias**, even when multiple entries share the same URL:
+
+| LiteLLM alias | Upstream URL | Credential |
+|---|---|---|
+| `tasks_personal` | `https://tasks.example.com/mcp` | Personal upstream bearer |
+| `tasks_work` | `https://tasks.example.com/mcp` | Work upstream bearer |
+
+These represent different upstream identities. LiteLLM retains their credentials; the Switcher selects their registry entries. Giving both aliases the same URL does not make their accounts interchangeable. The registry and tool lists are discovered dynamically; server and tool names are not hardcoded in the application.
+
+## Setup order
+
+1. Register the desired upstream URL/credential pairs in LiteLLM. Use addresses reachable **from LiteLLM**, such as direct Podman DNS or a trusted HTTPS frontend.
+2. Create the dedicated management virtual key with the routes listed below.
+3. Create a dedicated MCP team and exactly one MCP key for each Switcher user, manually or through the configuration menu below. Give the team an explicit server/tool ceiling and the key its initial selection. Keep existing LLM keys separate.
+4. Configure the Switcher using the example files and start it with access to LiteLLM and its project database.
+5. For a single client connector, register a user-specific Switcher alias in LiteLLM, grant it to the user's team/key, and configure it as always-on as described below.
+6. Connect the AI client to LiteLLM's `/mcp` endpoint using that user's LiteLLM MCP key. Use the Switcher Web UI or its control tools to change selections.
+
+An OAuth frontend may authenticate the client and map its identity to the appropriate backend bearer. That mapping belongs to the deployment's authentication layer; the Switcher itself authenticates with the configured bearers.
+
+### Configuration files
+
+Copy [`env.example`](env.example) to `.env` and [`config.conf_example`](config.conf_example) to `config.conf`. Both real files are git-ignored.
+
+| File | Contents |
+|---|---|
+| `.env` | Management key, user bearer pairs, always-on aliases, and database configuration |
+| `config.conf` | LiteLLM address, request timeout, listener switches, and Web UI refresh default |
+| [`container.example`](container.example) | Image reference, optional host publication ports, and additional container settings |
+
+Run `./config.sh` to use the New/Skip configuration flow and generate Compose/Quadlet files. For each user, enter a Switcher bearer or let OpenSSL generate one. LiteLLM generates the separate LiteLLM virtual key. `config.sh` and `optional_persistence.sh` are shared convention snapshots from `safrano9999/SCRIPTS/safrano9999/config`; use those sources for future synchronization.
+
+Each user is one repeat group:
 
 ```dotenv
-#repeat-group: USER suffix02 USER_NAME USER_SWITCHER_BEARER USER_LITELLM_BEARER USER_ALWAYS_ON_MCPS
+#repeat-group: USER suffix02 USER_NAME USER_SWITCHER_BEARER USER_ALLOWED_MCPS USER_LITELLM_BEARER USER_ALWAYS_ON_MCPS
+#repeat-optional-complete: USER_ALLOWED_MCPS USER_ALWAYS_ON_MCPS
+#repeat-unique: USER_NAME
 USER_NAME=rafael
 #secret
-USER_SWITCHER_BEARER=
+USER_SWITCHER_BEARER=example: openssl rand -hex 32
+USER_ALLOWED_MCPS=tasks_personal,documents_personal
 #secret
+#create-with: litellm_add_virtual.py
 USER_LITELLM_BEARER=
 USER_ALWAYS_ON_MCPS=
 ```
 
-New creates `_02`, `_03`, etc.; Skip stops adding groups. Duplicate names, duplicate assigned keys, duplicate login tokens and incomplete groups are rejected. There is no admin-name variable.
+New creates `_02`, `_03`, and subsequent groups; Skip stops adding users. Duplicate names, duplicate assigned keys, duplicate login tokens, and incomplete groups are rejected. There is no admin-name variable.
 
-`USER_ALWAYS_ON_MCPS` optionally lists comma-separated LiteLLM registry aliases for this user. Blank preserves the default behavior. For example, register `switcher_rafael` at `http://litellm-mcp-switcher:8000/mcp` using Rafael's **Switcher** bearer, grant it to his dedicated team/key, then set `USER_ALWAYS_ON_MCPS=switcher_rafael`. Other users require their own aliases and Switcher credentials; never share a user-bound control alias across users.
+### Create a LiteLLM key during setup
 
-Always-on MCPs remain enabled with all their tools when applying selections, saving projects, clearing all optional servers, or updating an administrative ceiling. The Web UI marks them **Always enabled** and disables their selection controls. Protection is enforced in the backend for REST and MCP calls too. The configured aliases must exist uniquely in the registry and have unrestricted tools in the user's team ceiling; the Switcher never bypasses a missing upstream grant. An administrator can remove this protection by changing the private configuration.
+Install the Python package first (`python3 -m pip install .`). Before running `./config.sh`, set the reachable `LITELLM_API_BASE_URL` in `config.conf` or the environment. Enter the administrative key, user name, Switcher bearer and allowed MCP aliases when prompted. If an authenticated registry request returns HTTP 200 and every alias resolves uniquely, the LiteLLM bearer prompt offers:
 
-With this arrangement a client can connect only to LiteLLM and see both the fixed Switcher control tools and the currently selected upstream tools. Whether a client refreshes its tool catalog during an existing chat must be checked in that client; permission changes do not guarantee a client-side refresh.
+```text
+(1) Enter existing LiteLLM bearer
+(2) Create new virtual key in LiteLLM
+```
+
+Choosing **2** creates a dedicated team whose MCP ceiling is `USER_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. The CSV is a setup input; subsequent permission changes are managed in LiteLLM and the Switcher. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
+
+Provisioning uses `LITELLM_ADMIN_VIRTUAL_KEY`. It needs `GET /v1/mcp/server`, `GET /team/info`, `POST /team/new`, `POST /team/update` and `POST /key/generate` permissions. Alternatively, supply `LITELLM_MASTER_KEY` temporarily in the setup process environment; the helper does not save it. The runtime management key still needs the permissions listed below to manage the newly created team and key.
+
+If LiteLLM cannot be reached or the inputs are incomplete, manual bearer entry remains available. An interrupted setup can continue with its own empty team; if that team already has a key, use the existing bearer. Always-on aliases must already be registered and included in the ceiling when configured. Creating a key does not register upstream MCP servers.
+
+The image includes the setup files under `/opt/f24sales/litellm-mcp-switcher` and the `litellm-add-virtual` command. The same helper runs from a checkout through `python3 litellm_add_virtual.py`.
+
+### Keep the Switcher available through LiteLLM
+
+For Rafael, register a LiteLLM alias such as:
+
+| Setting | Example |
+|---|---|
+| Alias | `switcher_rafael` |
+| Upstream URL | `http://litellm-mcp-switcher:8000/mcp` |
+| Upstream authentication | Rafael's `USER_SWITCHER_BEARER` |
+| Administrative ceiling and initial selection | Include this alias with all its tools |
+
+Then configure:
+
+```dotenv
+USER_ALWAYS_ON_MCPS=switcher_rafael
+```
+
+The client continues to use `USER_LITELLM_BEARER` at LiteLLM. LiteLLM uses `USER_SWITCHER_BEARER` only for the upstream call to Rafael's Switcher tools. For example, LiteLLM may expose `switcher_rafael-current_state` alongside `vikunja_rafael-projects_list`.
+
+Always-on aliases retain **all their tools** when applying selections, saving projects, clearing optional servers, or updating ceilings. The Web UI marks them **Always enabled** and disables their checkboxes. REST and MCP calls enforce the same protection. This prevents the user from removing the controls needed to switch servers back on.
+
+Aliases must exist uniquely in the registry and have unrestricted tools in the team's ceiling; the Switcher does not bypass missing grants. Each user needs a separate alias authenticated with their own Switcher bearer. Never share one user's control alias with another user. An administrator can change this protection through private configuration. Leave `USER_ALWAYS_ON_MCPS` blank if no aliases should be protected.
 
 ### LiteLLM management permissions
 
-The dedicated administrative key needs these routes:
+The dedicated administrative key needs:
 
 - `/key/info`, `/key/list`, `/key/update`
 - `/team/info`, `/team/list`, `/team/update`
 - `/v1/mcp/server`
 - `/mcp-rest/tools/list`
 
-Grant MCP discovery for the managed registry to this administrative identity, using the LiteLLM permission model. Do not grant LLM inference routes. The Switcher never returns management credentials, key values or upstream registry credentials to users.
+Grant MCP discovery for the managed registry to this identity through LiteLLM's permission model. Do not grant LLM inference routes. The assigned user key needs MCP inference routes and `/key/info`; key inspection authenticates through the Authorization header, never a key in the URL.
 
-The assigned user key needs MCP inference routes and `/key/info`. The latter is called with its Authorization header, never a key in the URL. The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` marker is used for a complete opt-out, because an empty list can inherit team access. Empty tool selections disable that server instead of passing an inheriting empty tool list.
+The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` marker represents complete opt-out because an empty upstream list can inherit team access. The Switcher handles this distinction when applying an empty selection.
 
-### Database
+### Database and listeners
 
-`MCP_SWITCHER_DB_BACKEND` selects `sqlite`, `postgres` or `mariadb` through SQLAlchemy. Alembic runs migrations before listeners start. Prefixes are validated and isolate tables in network databases.
+`MCP_SWITCHER_DB_BACKEND` selects `sqlite`, `postgres`, or `mariadb` through SQLAlchemy. Alembic runs migrations before listeners start. Network database table prefixes are validated.
 
-With SQLite, network database fields are omitted/blanked by the existing config.sh metadata. The fixed application directory is:
+With SQLite, `config.sh` omits/blanks network database fields and generates the persistent mount using the existing `*_DB_BACKEND` named-volume convention. The fixed application directory is `/opt/f24sales/litellm-mcp-switcher/sqlite`. No JSON state file or separately configured SQLite path is required. The explicit deployment Quadlet provides an equivalent volume; do not install generated and explicit Quadlets with the same container name.
 
-```text
-/opt/f24sales/litellm-mcp-switcher/sqlite
+The database holds owned projects, their selections and versions, and operation records for verification/recovery. Back it up using normal procedures for the selected backend.
+
+| Setting | Enabled behavior |
+|---|---|
+| `WEBUI_ENABLED=1` | Web UI and REST API on `0.0.0.0:8080` |
+| `MCP_ENABLED=1` | Streamable HTTP MCP on `0.0.0.0:8000/mcp` |
+| `WEBUI_REFRESH_SECONDS=30` | Default Web UI state refresh interval |
+
+Either listener can be disabled independently; disabling both is an error. Blank `WEBUI_PUBLISH_PORT` or `MCP_PUBLISH_PORT` disables that host publication without disabling the internal listener. With shared Podman networking and Caddy routing, neither needs a published host port. `LITELLM_API_BASE_URL` must be reachable from the Switcher; internal Podman DNS is preferred when both containers share a network.
+
+## Using the Web UI and MCP tools
+
+Open the Web UI and log in with your **Switcher bearer**. Select servers, expand their tool lists to choose subsets, and apply the complete selection. Save a project when you want to reuse a selection later.
+
+The browser keeps the login bearer only in page memory, not localStorage, cookies, or URLs. Reloading or signing out clears it. REST calls send `Authorization: Bearer …`; cookies from other services cannot authenticate the application.
+
+Background refresh follows backend changes while the form has no edits. Once edited, the draft is protected, including against requests already in flight. An external revision change appears as a conflict. Discard reloads current state; Apply rechecks both the revision and ceiling.
+
+Discovery lists tools without invoking them. A failed listing preserves saved access and reports an error. Successful discovery shows that the tool catalog was reachable, not that every tool call will succeed. Discovery uses bounded concurrency and a short cache.
+
+Administrative login provides a user selector for editing ceilings. Normal users cannot list other users, access their projects, call admin tools, or choose another target key.
+
+| User MCP tool | Purpose |
+|---|---|
+| `current_state` | Read allowed servers, active selection, projects, and current revision |
+| `discover_tools` | List the selectable tools of one permitted server |
+| `apply_selection` | Replace the active selection using the current revision |
+| `save_project` | Create or update a preset without activating it |
+| `delete_project` | Delete a preset without changing active access |
+| `refresh_tools` | Explicitly request that clients reload tools; requires the optional LiteLLM adapter |
+
+| Admin MCP tool | Purpose |
+|---|---|
+| `admin_list_users` | List configured users without credentials |
+| `admin_inspect_user` | Read one user's ceiling, selection, registry, and revision |
+| `admin_discover_tools` | Discover tools when defining a ceiling |
+| `admin_set_access` | Replace the user's ceiling and cap active access accordingly |
+
+Tool listings and calls enforce roles, including calls using cached tool names. Read-only tools carry `readOnlyHint: true`. Tools that change selections/projects or send refresh notifications explicitly instruct agents to act **only on the user's request for that specific action**. Research, discovery, or an upstream error does not authorize unsolicited changes. These descriptions guide agents; authentication, ownership, ceilings, and always-on protection are enforced by the backend.
+
+## Changing access and reloading client tools
+
+Updating permissions and updating the client's displayed tool catalog are separate steps:
+
+1. The Switcher writes the requested permissions to LiteLLM and verifies them by reading them back.
+2. LiteLLM uses the updated selection when serving tool lists and checking access.
+3. The MCP client must request a fresh `tools/list` to learn the new tool catalog.
+
+A successful Apply confirms **server-side permissions**. It does not confirm that the client has reloaded tools. A client may still display old names; its cached catalog does not restore revoked access. `WEBUI_REFRESH_SECONDS` refreshes only the Switcher Web UI and is not a delay or polling schedule for AI clients.
+
+The optional [LiteLLM notification adapter](integrations/litellm/README.md) can be bind-mounted into LiteLLM and loaded through its worker startup hook. Set this in **LiteLLM's environment**, using the adapter's [env.example](integrations/litellm/env.example):
+
+```dotenv
+LITELLM_MCP_AUTO_TOOL_NOTIFICATIONS=true
 ```
 
-Its mount is generated through the existing `*_DB_BACKEND` named-volume convention. No separate JSON state file or manually configured SQLite path is required. The explicit deployment Quadlet includes an equivalent dedicated volume. Do not install both generated and explicit Quadlets with the same container name.
+With the adapter installed, successful MCP permission updates emit `notifications/tools/list_changed` to affected connections. The Switcher's `refresh_tools` MCP tool can explicitly send that notification without changing access, projects, or model settings. Notifications are scoped to the assigned LiteLLM key; this is an adapter feature, not a built-in LiteLLM environment setting.
 
-Projects contain owner, ID, name, selection and version. An operation table stores pending/verified/uncertain outcomes. Neither table stores bearer tokens. Back up the chosen database using your normal database procedures.
+A client with an open Streamable HTTP GET/SSE channel can receive a notification without polling. A tool-triggered update can also deliver it on the corresponding POST response stream. Delivery depends on the client's connection and protocol support. The client must process the notification and request the catalog itself; the server cannot force a reload.
 
-### Listeners
+`notified_connections` reports notification send attempts, not confirmed client reloads. `client_refresh_required: true` is guidance, not a measurement of client behavior. If the catalog stays stale, use the client's reload-tools action or reconnect. In our Claude Web UI check, **Settings → Reload tools** loaded the new selection; sending the notification alone did not refresh that chat's catalog.
 
-- `WEBUI_ENABLED=1`: Web UI and REST listen on `0.0.0.0:8080`.
-- `MCP_ENABLED=1`: MCP listens on `0.0.0.0:8000/mcp`.
-- Each can be disabled independently. Disabling both is an error.
-- Blank `WEBUI_PUBLISH_PORT`/`MCP_PUBLISH_PORT` disables host publication, independently of internal listeners.
-
-The default refresh interval is 30 seconds. `LITELLM_API_BASE_URL` must be reachable from the application's network namespace. Internal Podman DNS is preferred when both containers share a network.
-
-## Use
-
-Open the Web UI and enter your **Switcher** bearer. The browser retains it only in page memory, not in localStorage, cookies or URLs. Reloading or signing out clears it. REST calls send `Authorization: Bearer …`; no cookie authentication is used, so browser cross-site requests do not acquire ambient login credentials. Browser cookies from other services cannot authenticate this application.
-
-Choose MCP servers, expand individual tool lists, and save a project. Saving does not activate it. Apply changes the assigned LiteLLM key for **every client using that key**. Independent simultaneous workspaces require separate configured LiteLLM keys.
-
-With no edits, background refresh follows the active backend selection. Once edited, the draft is protected, including against requests already in flight. An external revision change is shown as a conflict. Discard reloads current state. Apply rechecks the revision and the administrative ceiling.
-
-Discovery invokes only tool listing. A failed listing preserves the saved selection and displays an error. A successful listing is not proof that every tool invocation or multi-step browser session will work. Tools are loaded on demand with bounded concurrency and a short cache.
-
-Administrative login shows the configured user selector and edits the selected user's ceiling. Normal identities cannot list other users, access their projects, call administrative tools or choose a target key.
+The adapter's tested reference is LiteLLM `1.106.2` with MCP SDK `2.2.0`, one worker. Existing connections need a reconnect to negotiate its change-notification capability. See the [adapter documentation](integrations/litellm/README.md) for installation and protocol/worker limitations.
 
 ## REST API
 
-All `/api` routes require an injected bearer.
+All `/api` routes require a configured bearer.
 
 | Method and path | Purpose |
 |---|---|
 | `GET /api/me` | Identity and default refresh interval |
-| `GET /api/state` | Own ceiling, active selection, projects and revision |
+| `GET /api/state` | Own ceiling, active selection, projects, and revision |
 | `GET /api/servers/{id}/tools` | Discover a permitted server's tools |
 | `POST /api/projects` | Create a saved project |
 | `PUT /api/projects/{id}` | Update using its current version |
@@ -124,7 +264,7 @@ All `/api` routes require an injected bearer.
 | `GET /api/admin/users/{name}/servers/{id}/tools` | Admin: tool discovery |
 | `PUT /api/admin/users/{name}/access` | Admin: replace ceiling and cap active access |
 
-Selections use stable LiteLLM server IDs:
+Selections use stable LiteLLM server IDs. Obtain them and the revision from the current state:
 
 ```json
 {
@@ -138,28 +278,9 @@ Selections use stable LiteLLM server IDs:
 }
 ```
 
-An empty `servers` object disables all optional MCP access. Configured always-on MCPs retain all their tools; without configured aliases, empty still disables every MCP. State responses include `always_on_mcps` as resolved server IDs. Project writes additionally take `name` and, for updates, `version`. Unknown request fields are rejected. The public `/openapi.json` describes schemas, not credentials. `/healthz` indicates local WebUI listener readiness; authenticated state/discovery reports upstream availability.
+`null` selects all tools permitted by the ceiling; a nonempty array selects those tools. Omitting a server or giving it an empty tool array disables that optional server. An empty `servers` object disables all optional servers. Always-on MCPs retain all their tools; without always-on aliases, empty disables every MCP. State responses include resolved `always_on_mcps` server IDs.
 
-## MCP tools
-
-Configure a client with the Switcher `/mcp` URL and the appropriate bearer.
-
-User tools:
-- `current_state`
-- `discover_tools`
-- `save_project`
-- `delete_project`
-- `apply_selection`
-
-Admin tools:
-- `admin_list_users`
-- `admin_inspect_user`
-- `admin_discover_tools`
-- `admin_set_access`
-
-Role checks filter tool listings and also enforce calls against cached tool names. Upstream MCP tools remain on LiteLLM's endpoint.
-
-Read-only tools carry `readOnlyHint: true`. Every mutating tool explicitly instructs agents to act only when the user requests that specific change, never as unsolicited setup, cleanup, optimization, or troubleshooting. Access updates require reading the current state and preserving unrelated selections. These descriptions and MCP annotations guide clients; authentication, ownership, ceilings, and always-on protection remain enforced by the backend.
+Project writes also take `name` and, for updates, `version`. Unknown request fields are rejected. Public `/openapi.json` describes schemas, not credentials. `/healthz` indicates local Web UI listener readiness; authenticated state and discovery report upstream availability.
 
 ## Concurrent changes and uncertain writes
 

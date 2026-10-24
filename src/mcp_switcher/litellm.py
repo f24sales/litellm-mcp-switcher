@@ -101,6 +101,14 @@ class LiteLLM:
         await self.request("POST", "/team/update", json={"team_id": team["team_id"],
             "object_permission": merge_permission(team.get("object_permission") or {}, selection)})
 
+    async def refresh_tools(self, identity):
+        data = await self.request("POST", "/mcp/notify-tools-changed", token=identity.litellm_key, json={})
+        if (data.get("notification") != "notifications/tools/list_changed"
+                or data.get("permissions_changed") is not False):
+            raise Problem(502, "LiteLLM did not confirm the tool-list change notification")
+        return {key: data.get(key) for key in ("notification", "notified_connections",
+                                             "permissions_changed", "client_refresh_required")}
+
     async def tools(self, server_id):
         data = await self.request("GET", "/mcp-rest/tools/list", params={"server_id": server_id})
         if data.get("status") in {"error", "failed"} or data.get("error"):

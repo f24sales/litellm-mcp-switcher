@@ -1,0 +1,5 @@
+[Container]
+Volume=/path/to/litellm-mcp-switcher/integrations/litellm:/etc/litellm/extensions:ro,Z
+Environment=PYTHONPATH=/etc/litellm/extensions:/app
+Environment=LITELLM_WORKER_STARTUP_HOOKS=mcp_tool_changes:install
+EnvironmentFile=/path/to/litellm.env

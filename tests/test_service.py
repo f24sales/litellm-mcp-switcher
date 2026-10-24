@@ -13,6 +13,20 @@ def selection(**servers):
     return Selection(servers=servers)
 
 
+async def test_explicit_refresh_uses_assigned_key_and_never_writes_permissions(setup):
+    service, fake, (admin, alice, _) = setup
+    before = copy.deepcopy((fake.keys, fake.teams))
+    result = await service.refresh_tools(alice)
+    assert result["user"] == alice.name
+    assert result["notification"] == "notifications/tools/list_changed"
+    assert result["permissions_changed"] is False
+    assert fake.notifications == [alice.litellm_key]
+    assert fake.writes == [] and (fake.keys, fake.teams) == before
+    with pytest.raises(Problem):
+        await service.refresh_tools(admin)
+    assert fake.notifications == [alice.litellm_key]
+
+
 async def test_operation_epoch_timestamps_keep_subsecond_precision(setup):
     service, _, (_, alice, _) = setup
     expires = 1792626377.125

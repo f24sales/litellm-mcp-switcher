@@ -51,6 +51,7 @@ def test_mcp_http_auth_catalog_and_cached_admin_call(setup):
         assert status == 200
         names = {t["name"] for t in data["result"]["tools"]}
         assert "current_state" in names and "admin_set_access" not in names
+        assert "refresh_tools" in names
         for tool in data["result"]["tools"]:
             readonly = tool["name"] in {"current_state", "discover_tools"}
             assert tool["annotations"]["readOnlyHint"] is readonly
