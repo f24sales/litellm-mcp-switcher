@@ -3,6 +3,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier, require_scopes
 from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.sessions import create_session, get_session, InvalidSession
 
 from .config import authenticate
 from .models import ApplyInput, Problem, ProjectInput, Selection
@@ -23,7 +24,8 @@ def create_mcp(service, identities):
             if user is None:
                 return None
             return AccessToken(token=token, client_id=user.name,
-                scopes=["admin" if user.admin else "user"], claims={"sub": user.name})
+                scopes=(["admin"] if user.admin else ["user", "orchestrator"] if user.orchestrator else ["user"]),
+                claims={"sub": user.name})
 
     mcp = FastMCP("LiteLLM MCP Switcher", auth=Verifier(), mask_error_details=True)
 
@@ -40,44 +42,83 @@ def create_mcp(service, identities):
         except Problem as exc:
             raise ToolError(exc.message) from None
 
-    @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": True})
-    async def current_state() -> dict:
-        """Read only: inspect your allowed MCP servers, active selection, projects and revision. Changes nothing."""
-        return await run(service.state(actor()))
+    async def target(session_id):
+        user = actor()
+        if not user.orchestrator:
+            return user
+        if not session_id:
+            raise ToolError("Call choose_bearer first and pass its session_id on subsequent calls")
+        try:
+            session = await get_session(session_id)
+            name = await session.get("target_key", default=user.key_names[0])
+            return service.target(user, name)
+        except InvalidSession:
+            raise ToolError("Unknown chooser session; call choose_bearer to open a new session") from None
+        except Problem as exc:
+            raise ToolError(exc.message) from None
+
+    @mcp.tool(auth=require_scopes("orchestrator"),
+              annotations={"readOnlyHint": False, "destructiveHint": False},
+              description=CHANGE_POLICY + "\n\nList managed LiteLLM key names and select the target for this "
+              "orchestrator session. No LiteLLM permissions are changed. Call without session_id to open a "
+              "new independent chooser session; the first configured key is selected by default. Pass the "
+              "returned session_id to every subsequent management call. To inspect the current target, "
+              "supply session_id and omit key_name. Key values are never returned.")
+    async def choose_bearer(key_name: str | None = None, session_id: str | None = None) -> dict:
+        user = actor()
+        try:
+            if key_name is not None:
+                service.target(user, key_name)
+            session_id = session_id or await create_session()
+            session = await get_session(session_id)
+            chosen = key_name or await session.get("target_key", default=user.key_names[0])
+            service.target(user, chosen)
+            await session.set("target_key", chosen)
+            return {"key_names": list(user.key_names), "target_key": chosen, "session_id": session_id}
+        except InvalidSession:
+            raise ToolError("Unknown chooser session; omit session_id to open a new session") from None
+        except Problem as exc:
+            raise ToolError(exc.message) from None
 
     @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": True})
-    async def discover_tools(server_id: str) -> dict:
+    async def current_state(session_id: str | None = None) -> dict:
+        """Read only: inspect the selected key’s allowed MCP servers, active selection, projects and revision. Changes nothing."""
+        return await run(service.state(await target(session_id)))
+
+    @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": True})
+    async def discover_tools(server_id: str, session_id: str | None = None) -> dict:
         """Read only: list selectable tools of one permitted server without invoking them or changing access."""
-        return await run(service.tools(actor(), server_id))
+        selected = await target(session_id)
+        return {"target_key": selected.name, **await run(service.tools(selected, server_id))}
 
     @mcp.tool(auth=require_scopes("user"),
               annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
               description=CHANGE_POLICY + "\n\nOnly on the user's explicit request, notify MCP clients "
-              "connected with your assigned LiteLLM key that their tool list should be reloaded. "
+              "connected with the selected LiteLLM key that their tool list should be reloaded. "
               "Never changes the selected servers, tool permissions, projects or LLM settings. "
               "This sends notifications/tools/list_changed; clients must support the notification and "
               "request tools/list themselves. It cannot force a client to refresh. Never trigger this "
               "automatically as unsolicited troubleshooting.")
-    async def refresh_tools() -> dict:
+    async def refresh_tools(session_id: str | None = None) -> dict:
         """Explicitly request a client tool-list refresh without changing any access settings."""
-        return await run(service.refresh_tools(actor()))
+        return await run(service.refresh_tools(await target(session_id)))
 
     @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": False},
               description=CHANGE_POLICY + "\n\nCreate or update your saved project only on explicit request. "
               "Saving does not activate it. Updates require its version. Always-on MCPs retain all their tools.")
     async def save_project(name: str, selection: Selection, project_id: str | None = None,
-                           version: int | None = None) -> dict:
+                           version: int | None = None, session_id: str | None = None) -> dict:
         """Create or update your project. Saving does not activate it. Updates require its version."""
         data = ProjectInput(name=name, selection=selection, version=version)
-        return await run(service.save_project(actor(), data, project_id))
+        return await run(service.save_project(await target(session_id), data, project_id))
 
     @mcp.tool(auth=require_scopes("user"), annotations={"readOnlyHint": False, "destructiveHint": True},
               description=CHANGE_POLICY + "\n\nDelete only the saved project the user explicitly asks to delete, "
               "using its current version. Active access is unchanged.")
-    async def delete_project(project_id: str, version: int) -> dict:
+    async def delete_project(project_id: str, version: int, session_id: str | None = None) -> dict:
         """Delete your saved project using its current version. Active access is unchanged."""
         try:
-            return service.delete_project(actor(), project_id, version)
+            return service.delete_project(await target(session_id), project_id, version)
         except Problem as exc:
             raise ToolError(exc.message) from None
 
@@ -87,14 +128,14 @@ def create_mcp(service, identities):
               "requests its removal. This replaces the complete active selection for every client using this "
               "LiteLLM key. An empty servers object disables every optional MCP and requires an explicit request "
               "to do so. Always-on MCPs retain all their tools. Never changes LLM settings.")
-    async def apply_selection(selection: Selection, revision: str) -> dict:
+    async def apply_selection(selection: Selection, revision: str, session_id: str | None = None) -> dict:
         """Activate your complete MCP selection. Obtain revision from current_state first.
 
         An empty servers object disables optional MCPs. Configured always-on MCPs and
         all their tools are retained. This affects every client using your assigned
         LiteLLM key. It never changes LLM settings.
         """
-        return await run(service.apply(actor(), ApplyInput(selection=selection, revision=revision)))
+        return await run(service.apply(await target(session_id), ApplyInput(selection=selection, revision=revision)))
 
     @mcp.tool(auth=require_scopes("admin"), annotations={"readOnlyHint": True})
     async def admin_list_users() -> dict:

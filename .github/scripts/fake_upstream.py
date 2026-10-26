@@ -27,7 +27,7 @@ class Handler(BaseHTTPRequestHandler):
         global key_permission, permission
         data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         if self.path == "/key/update":
-            assert data["key"] == os.environ["USER_LITELLM_BEARER"]
+            assert data["key"] == os.environ["LITELLM_MCP_SWITCHER_KEY_BEARER"]
             key_permission = data["object_permission"]
         elif self.path == "/team/update":
             permission = data["object_permission"]

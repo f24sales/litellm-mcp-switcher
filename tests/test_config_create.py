@@ -129,3 +129,49 @@ def test_repeat_new_targets_next_pair_and_skip_calls_nothing(tmp_path):
     assert (tmp_path / "calls").read_text() == "check TOKEN_02\ncreate TOKEN_02\n"
     assignments = [line for line in (tmp_path / ".env").read_text().splitlines() if line.startswith("TOKEN")]
     assert assignments == ["TOKEN=existing-bearer", "TOKEN_02=generated-test-bearer"]
+
+
+def test_optional_orchestrator_new_skip_and_openssl(tmp_path):
+    example = '''#repeat-group: ORCHESTRATOR suffix02 NAME BEARER KEY_NAMES
+#repeat-optional-group: ORCHESTRATOR
+#required: name
+NAME=orchestrator
+#required: login
+#secret
+BEARER=example: openssl rand -hex 32
+#required: target names
+KEY_NAMES=
+'''
+    setup_files(tmp_path, example)
+    assert interactive(tmp_path, [('ORCHESTRATOR [skip/new]', 'skip')])[0] == 0
+    assert 'BEARER=' not in (tmp_path / '.env').read_text()
+    status, output = interactive(tmp_path, [('ORCHESTRATOR [skip/new]', 'new'),
+        ('NAME', ''), ('Choose [1/2]', '2'), ('KEY_NAMES', 'alice,bob')])
+    assert status == 0, output
+    text = (tmp_path / '.env').read_text()
+    bearer = next(line.split('=', 1)[1] for line in text.splitlines() if line.startswith('BEARER='))
+    assert len(bearer) == 64 and all(c in '0123456789abcdef' for c in bearer)
+    assert bearer not in output
+    assert 'KEY_NAMES=alice,bob' in text
+
+
+def test_namespaced_container_metadata_and_bool_ports(tmp_path):
+    setup_files(tmp_path, '')
+    root = CONFIG.parent
+    shutil.copyfile(root / 'container.example', tmp_path / 'container.example')
+    (tmp_path / 'container.conf').write_text('''LITELLM_MCP_SWITCHER_CONTAINER_NAME=custom-switcher
+LITELLM_MCP_SWITCHER_IMAGE=example.test/switcher:latest
+LITELLM_MCP_SWITCHER_WEBUI_PUBLISH_PORT=28080
+LITELLM_MCP_SWITCHER_MCP_PUBLISH_PORT=
+LITELLM_MCP_SWITCHER_ADDITIONAL_LINE=ReadOnly=true
+''')
+    (tmp_path / 'config.conf').write_text('LITELLM_MCP_SWITCHER_WEBUI_ENABLED=1\n')
+    result = subprocess.run(['bash', 'config.sh', '--render-container'], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    unit = (tmp_path / 'custom-switcher.container').read_text()
+    assert 'Image=example.test/switcher:latest' in unit
+    assert 'ContainerName=custom-switcher' in unit
+    assert 'PublishPort=28080:8080' in unit
+    assert ':8000' not in unit
+    assert 'ReadOnly=true' in unit

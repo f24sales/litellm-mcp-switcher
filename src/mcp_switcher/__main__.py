@@ -22,10 +22,10 @@ class Server(uvicorn.Server):
 
 async def serve():
     settings, users = load_configuration()
-    prefix = settings.mcp_switcher_db_prefix if settings.mcp_switcher_db_backend != "sqlite" else "mcp_switcher"
+    prefix = settings.mcp_switcher_db_prefix if settings.mcp_switcher_db_backend != "sqlite" else "litellm_mcp_switcher"
     db = Database(settings.database_url(), prefix)
     db.migrate()
-    db.initialize_owners([u.name for u in users if not u.admin])
+    db.initialize_owners([u.name for u in users if u.litellm_key and not u.admin])
     upstream = LiteLLM(settings)
     service = Service(db, upstream, users, settings)
     apps = []

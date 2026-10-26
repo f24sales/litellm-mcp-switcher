@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "litellm-mcp-switcher"
-version = "2026.10.7"
+version = "2026.10.8"
 description = "Project-based MCP access selection for existing LiteLLM virtual keys"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,7 @@ test = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "respx==0.23.1", "ruff==0.17.1
 [project.scripts]
 litellm-mcp-switcher = "mcp_switcher.__main__:main"
 litellm-add-virtual = "mcp_switcher.provision:main"
+litellm-mcp-switcher-migrate-config = "mcp_switcher.migrate_config:main"
 [tool.setuptools.package-data]
 mcp_switcher = ["templates/*.html", "static/*", "migrations/*.py", "migrations/versions/*.py"]
 [tool.pytest.ini_options]

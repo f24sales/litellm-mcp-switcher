@@ -8,16 +8,16 @@ from .models import Problem
 from .litellm import intersect
 
 
-def revision(ceiling, active, raw=None, always_on=()):
+def revision(ceiling, active, raw=None, always_on=(), target_key=""):
     value = {"ceiling": ceiling.model_dump(), "active": active.model_dump(), "raw": raw,
-             "always_on": sorted(always_on)}
+             "always_on": sorted(always_on), "target_key": target_key}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 class Service:
     def __init__(self, db, upstream, users, settings):
         self.db, self.upstream, self.settings = db, upstream, settings
-        self.users = {u.name: u for u in users if not u.admin}
+        self.users = {u.name: u for u in users if u.litellm_key and not u.admin}
         self.discovery_limit = asyncio.Semaphore(3)
         self.discovery = {}
 
@@ -25,6 +25,11 @@ class Service:
         if actor.admin:
             if not name or name not in self.users:
                 raise Problem(404, "Choose a configured user")
+            return self.users[name]
+        if actor.orchestrator:
+            name = name or actor.key_names[0]
+            if name not in actor.key_names or name not in self.users:
+                raise Problem(403, "This orchestrator cannot manage that key")
             return self.users[name]
         if name is not None and name != actor.name:
             raise Problem(403, "This identity cannot manage another user")
@@ -39,7 +44,7 @@ class Service:
     async def refresh_tools(self, actor):
         target = self.target(actor)
         result = await self.upstream.refresh_tools(target)
-        return {"user": target.name, **result}
+        return {"user": target.name, "target_key": target.name, **result}
 
     def always_on(self, target, inventory):
         servers = {}
@@ -72,10 +77,10 @@ class Service:
         target, inventory, info, _, ceiling, active = await self.snapshot(actor, name)
         operation = await self.reconcile(target, info, ceiling, active)
         visible = inventory if actor.admin else [s for s in inventory if s["server_id"] in ceiling.servers]
-        return {"user": target.name, "admin": actor.admin, "servers": visible,
+        return {"user": target.name, "target_key": target.name, "admin": actor.admin, "servers": visible,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
                 "always_on_mcps": list(self.always_on(target, inventory)),
-                "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps),
+                "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps, target.name),
                 "projects": self.db.list_projects(target.name),
                 "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
                 "refresh_seconds": self.settings.webui_refresh_seconds}
@@ -131,19 +136,20 @@ class Service:
         target, inventory, _, _, ceiling, _ = await self.snapshot(actor)
         data = data.model_copy(update={"selection": self.protect(target, inventory, data.selection)})
         await self.validate(actor, data.selection, ceiling, inventory)
-        return self.db.save_project(actor.name, data, project_id)
+        return {**self.db.save_project(target.name, data, project_id), "target_key": target.name}
 
     def delete_project(self, actor, project_id, version):
         if actor.admin:
             raise Problem(403, "Use a user identity to manage projects")
-        self.db.delete_project(actor.name, project_id, version)
-        return {"deleted": True}
+        target = self.target(actor)
+        self.db.delete_project(target.name, project_id, version)
+        return {"deleted": True, "target_key": target.name}
 
     async def apply(self, actor, data, name=None, ceiling_change=False):
         if ceiling_change and not actor.admin:
             raise Problem(403, "Administrative access required")
         target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)
-        if revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps) != data.revision:
+        if revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps, target.name) != data.revision:
             raise Problem(409, "Access changed since your last refresh; review the current state")
         selected = self.protect(target, inventory, data.selection)
         await self.validate(actor, selected, ceiling, inventory, name)
@@ -160,7 +166,7 @@ class Service:
                            timeout=self.settings.litellm_request_timeout_seconds * 12 + 60) as operation_id:
             # Re-read after acquiring the cross-request lease.
             _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
-            if revision(upper, current, fresh_info["_switcher_raw_active"], target.always_on_mcps) != data.revision:
+            if revision(upper, current, fresh_info["_switcher_raw_active"], target.always_on_mcps, target.name) != data.revision:
                 self.db.finish(target.name, operation_id, "conflict", "Access changed before the update")
                 raise Problem(409, "Access changed before the update")
             if ceiling_change:

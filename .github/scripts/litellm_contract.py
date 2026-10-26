@@ -22,16 +22,16 @@ from mcp_switcher.service import Service
 
 async def provision_contract(req, master, sid):
     """Exercise the setup helper against LiteLLM, without production credentials."""
-    values = {"LITELLM_API_BASE_URL": "http://127.0.0.1:4000", "LITELLM_MASTER_KEY": master,
-              "USER_NAME_02": "setup-contract", "USER_SWITCHER_BEARER_02": "s" * 64,
-              "USER_ALLOWED_MCPS_02": "contract"}
-    helper = Provisioner(values, "USER_LITELLM_BEARER_02")
+    values = {"LITELLM_MCP_SWITCHER_API_BASE_URL": "http://127.0.0.1:4000", "LITELLM_MASTER_KEY": master,
+              "LITELLM_MCP_SWITCHER_KEY_NAME_02": "setup-contract", "LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER_02": "s" * 64,
+              "LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS_02": "contract"}
+    helper = Provisioner(values, "LITELLM_MCP_SWITCHER_KEY_BEARER_02")
     try:
         permission = await asyncio.to_thread(helper.check)
         assert permission["mcp_servers"] == [sid]
         key = await asyncio.to_thread(helper.create)
         settings = Settings(litellm_admin_virtual_key=SecretStr(master),
-                            litellm_api_base_url=values["LITELLM_API_BASE_URL"])
+                            litellm_api_base_url=values["LITELLM_MCP_SWITCHER_API_BASE_URL"])
         upstream = LiteLLM(settings)
         try:
             identity = Identity("setup-contract", "s" * 64, key)

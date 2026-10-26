@@ -9,6 +9,9 @@ function notify(text, error = false) { $('message').textContent = text; $('messa
 function hideMessage() { $('message').hidden = true; }
 function node(tag, text, cls) { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; }
 async function api(path, options = {}) {
+  if (identity?.orchestrator && path.startsWith('/api/') && path !== '/api/me' && !path.includes('key_name=')) {
+    path += `${path.includes('?') ? '&' : '?'}key_name=${encodeURIComponent($('target-key').value)}`;
+  }
   const response = await fetch(path, { ...options, headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {})}, cache: 'no-store' });
   const data = await response.json();
   if (!response.ok) {
@@ -18,7 +21,7 @@ async function api(path, options = {}) {
   return data;
 }
 function base() { return identity.admin ? `/api/admin/users/${encodeURIComponent($('admin-user').value)}` : '/api'; }
-function statePath() { return identity.admin ? base() : '/api/state'; }
+function statePath() { return identity.admin ? base() : identity.orchestrator ? `/api/state?key_name=${encodeURIComponent($('target-key').value)}` : '/api/state'; }
 function selectionChanged() {
   preserveAlwaysOn(draft.selection, latest?.always_on_mcps);
   draft.edit(draft.selection);
@@ -29,7 +32,7 @@ function updateActions() {
   $('draft-state').textContent = draft.dirty ? 'Unsaved selection' : 'In sync';
   $('selection-count').textContent = `${Object.keys(draft.selection.servers).length} selected`;
   const pending = latest && ['pending', 'uncertain'].includes(latest.operation.status);
-  $('apply').disabled = busy || !draft.dirty || draft.conflict || pending;
+  $('apply').disabled = busy || !latest || !draft.dirty || draft.conflict || pending;
   $('discard').disabled = busy || (!draft.dirty && !draft.conflict);
   $('save-project').disabled = busy || !latest;
   $('delete-project').disabled = busy || !projectId;
@@ -48,6 +51,7 @@ async function refresh(force = false) {
     const state = await api(path);
     if (id !== refreshId || path !== statePath()) return;
     latest = state;
+    if (identity.orchestrator) $('apply-note').textContent = `Applies to every client using LiteLLM key ${state.target_key}.`;
     if (force) draft.reset(state, identity.admin); else draft.accept(state, epoch, identity.admin);
     preserveAlwaysOn(draft.selection, state.always_on_mcps);
     rebuildProjects(); renderCards(); updateActions();
@@ -92,8 +96,11 @@ function renderCards() {
       expanded.add(sid);
       if (!catalog.has(sid)) {
         body.replaceChildren(node('p', 'Discovering tools…'));
-        try { catalog.set(sid, await api(`${base()}/servers/${encodeURIComponent(sid)}/tools`)); }
-        catch (e) { catalog.set(sid, {status:'error', tools:[], message:e.message}); }
+        const target = latest.target_key;
+        try { const result = await api(`${base()}/servers/${encodeURIComponent(sid)}/tools`);
+          if (latest?.target_key !== target) return;
+          catalog.set(sid, result); }
+        catch (e) { if (latest?.target_key !== target) return; catalog.set(sid, {status:'error', tools:[], message:e.message}); }
         if (details.isConnected && details.open) renderCards();
       }
     };
@@ -106,7 +113,9 @@ function renderTools(sid, body) {
   if (entry.status !== 'reachable') {
     body.append(node('p', entry.message || 'Tool discovery failed. Saved access is preserved.'));
     const retry = node('button', 'Retry discovery'); retry.onclick = async () => {
-      try { catalog.set(sid, await api(`${base()}/servers/${encodeURIComponent(sid)}/tools?refresh=true`)); renderCards(); }
+      const target = latest.target_key;
+      try { const result = await api(`${base()}/servers/${encodeURIComponent(sid)}/tools?refresh=true`);
+        if (latest?.target_key !== target) return; catalog.set(sid, result); renderCards(); }
       catch (e) { notify(e.message, true); }
     }; body.append(retry); return;
   }
@@ -156,8 +165,10 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
   try {
     identity = await api('/api/me'); $('who').textContent = identity.name; $('identity').hidden = false;
     $('login').hidden = true; $('workspace').hidden = false;
+    $('target-bar').hidden = !identity.orchestrator;
+    if (identity.orchestrator) $('target-key').replaceChildren(...identity.key_names.map(name => new Option(name, name)));
     $('admin-bar').hidden = !identity.admin; $('project-bar').hidden = identity.admin;
-    $('workspace-label').textContent = identity.admin ? 'ADMINISTRATION' : 'YOUR WORKSPACE';
+    $('workspace-label').textContent = identity.admin ? 'ADMINISTRATION' : identity.orchestrator ? 'ORCHESTRATOR' : 'YOUR WORKSPACE';
     $('mode-description').textContent = identity.admin ? 'Define the MCP servers and tools each user may choose from.' : 'Choose your tools. Save a project. Apply when you\'re ready.';
     $('apply').textContent = identity.admin ? 'Update access ↗' : 'Apply selection ↗';
     $('apply-note').textContent = identity.admin ? 'Revocations also limit existing projects and active selections.' : 'Applies to every client using your assigned LiteLLM key.';
@@ -167,6 +178,13 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
   } catch (e) { logout(); notify(e.message, true); }
 })(); };
 $('logout').onclick = logout;
+$('target-key').onchange = () => {
+  if (busy || (draft.dirty && !confirm('Discard this key’s unsaved selection and change target?'))) {
+    $('target-key').value = latest?.target_key || identity.key_names[0]; return;
+  }
+  catalog.clear(); expanded.clear(); projectId = ''; latest = null;
+  refreshId++; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true);
+};
 $('admin-user').onchange = () => { catalog.clear(); expanded.clear(); draft.dirty = false; draft.epoch++; refresh(true); };
 $('search').oninput = renderCards;
 $('refresh').onchange = setTimer;

@@ -23,8 +23,8 @@ def request(url, bearer=None, payload=None):
         return e.code, e.read().decode()
 
 
-web = os.environ.get("WEBUI_ENABLED", "1") == "1"
-mcp = os.environ.get("MCP_ENABLED", "1") == "1"
+web = os.environ.get("LITELLM_MCP_SWITCHER_WEBUI_ENABLED", "1") == "1"
+mcp = os.environ.get("LITELLM_MCP_SWITCHER_MCP_ENABLED", "1") == "1"
 for port, enabled in [(8080, web), (8000, mcp)]:
     for attempt in range(40):
         try:
@@ -49,8 +49,8 @@ else:
 if web:
     assert request("http://127.0.0.1:8080/healthz")[0] == 200
     assert request("http://127.0.0.1:8080/api/me")[0] == 401
-    assert request("http://127.0.0.1:8080/api/me", os.environ["USER_SWITCHER_BEARER"])[0] == 200
-    key = os.environ["USER_SWITCHER_BEARER"]
+    assert request("http://127.0.0.1:8080/api/me", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"])[0] == 200
+    key = os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"]
     status, content = request("http://127.0.0.1:8080/api/state", key)
     assert status == 200, content
     state = json.loads(content)
@@ -66,11 +66,11 @@ if web:
 if mcp:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     assert request("http://127.0.0.1:8000/mcp", "unknown", payload)[0] == 401
-    status, content = request("http://127.0.0.1:8000/mcp", os.environ["USER_SWITCHER_BEARER"], payload)
+    status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"], payload)
     assert status == 200 and 'current_state' in content and 'admin_set_access' not in content
-    status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_ADMIN_VIRTUAL_KEY"], payload)
+    status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY"], payload)
     assert status == 200 and 'admin_set_access' in content and 'apply_selection' not in content
-    status, content = request("http://127.0.0.1:8000/mcp", os.environ["USER_SWITCHER_BEARER"],
+    status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"],
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "current_state", "arguments": {}}})
     assert status == 200 and 'ci-user' in content and '"isError":true' not in content.replace(' ', '')
 print("Candidate listeners and MCP role separation passed")

@@ -4,7 +4,7 @@ Loaded by the LiteLLM worker startup hook `mcp_tool_changes:install`.
 The Quadlet drop-in `40-mcp-tool-changes.conf` bind mounts this directory
 read-only at `/etc/litellm/extensions`. Upstream source files and image are unchanged.
 
-Set `LITELLM_MCP_AUTO_TOOL_NOTIFICATIONS=true` in the LiteLLM container environment
+Set `LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS=true` in the LiteLLM container environment
 to enable the extension, or `false` to disable automatic notifications on its next startup.
 The explicit notification API remains available.
 See [env.example](env.example) and [container-dropin.example](container-dropin.example).

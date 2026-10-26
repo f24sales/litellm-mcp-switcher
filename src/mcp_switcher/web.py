@@ -37,6 +37,11 @@ def create_web(service, identities):
             raise Problem(401, "A configured Switcher bearer is required")
         return identity
 
+    def selected(key_name: str | None = Query(default=None), user=Depends(actor)):
+        if user.admin:
+            raise Problem(403, "Use the administrative endpoints for administrative access")
+        return service.target(user, key_name)
+
     @app.get("/", include_in_schema=False)
     async def home(request: Request):
         return templates.TemplateResponse(request=request, name="index.html", context={})
@@ -49,30 +54,31 @@ def create_web(service, identities):
     @app.get("/api/me")
     async def me(user=Depends(actor)):
         return {"name": user.name, "admin": user.admin,
+                "orchestrator": user.orchestrator, "key_names": list(user.key_names),
                 "refresh_seconds": service.settings.webui_refresh_seconds}
 
     @app.get("/api/state")
-    async def state(user=Depends(actor)):
+    async def state(user=Depends(selected)):
         return await service.state(user)
 
     @app.get("/api/servers/{server_id}/tools")
-    async def tools(server_id: str, refresh: bool = False, user=Depends(actor)):
+    async def tools(server_id: str, refresh: bool = False, user=Depends(selected)):
         return await service.tools(user, server_id, refresh=refresh)
 
     @app.post("/api/projects", status_code=201)
-    async def create_project(data: ProjectInput, user=Depends(actor)):
+    async def create_project(data: ProjectInput, user=Depends(selected)):
         return await service.save_project(user, data)
 
     @app.put("/api/projects/{project_id}")
-    async def update_project(project_id: str, data: ProjectInput, user=Depends(actor)):
+    async def update_project(project_id: str, data: ProjectInput, user=Depends(selected)):
         return await service.save_project(user, data, project_id)
 
     @app.delete("/api/projects/{project_id}")
-    async def delete_project(project_id: str, version: int = Query(ge=1), user=Depends(actor)):
+    async def delete_project(project_id: str, version: int = Query(ge=1), user=Depends(selected)):
         return service.delete_project(user, project_id, version)
 
     @app.post("/api/apply")
-    async def apply(data: ApplyInput, user=Depends(actor)):
+    async def apply(data: ApplyInput, user=Depends(selected)):
         return await service.apply(user, data)
 
     def admin(user):

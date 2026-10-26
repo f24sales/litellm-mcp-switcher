@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (JSON, Column, Float, Integer, MetaData, String, Table, Text,
-                        create_engine, event, insert, select, update)
+                        create_engine, event, insert, select, update, inspect)
 from sqlalchemy.exc import IntegrityError
 from pathlib import Path
 
@@ -15,7 +15,7 @@ from .models import Problem
 
 
 class Database:
-    def __init__(self, url, prefix="mcp_switcher"):
+    def __init__(self, url, prefix="litellm_mcp_switcher"):
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", prefix):
             raise ValueError("Invalid database table prefix")
         self.prefix = prefix
@@ -43,6 +43,19 @@ class Database:
         config.set_main_option("version_table", self.prefix + "_alembic_version")
         config.attributes["database"] = self
         with self.engine.begin() as conn:
+            # Rename the former default tables in place, preserving owners, projects and leases.
+            if self.prefix == "litellm_mcp_switcher":
+                existing = set(inspect(conn).get_table_names())
+                suffixes = ("projects", "operations", "alembic_version")
+                old = {"mcp_switcher_" + suffix for suffix in suffixes}
+                new = {self.prefix + "_" + suffix for suffix in suffixes}
+                if existing & old:
+                    if not old <= existing or existing & new:
+                        raise RuntimeError("Conflicting old and new Switcher tables; migration needs review")
+                    quote = conn.dialect.identifier_preparer.quote
+                    for suffix in suffixes:
+                        conn.exec_driver_sql("ALTER TABLE " + quote("mcp_switcher_" + suffix)
+                                             + " RENAME TO " + quote(self.prefix + "_" + suffix))
             config.attributes["connection"] = conn
             command.upgrade(config, "head")
 

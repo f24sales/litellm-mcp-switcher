@@ -188,8 +188,36 @@ discover_podman_host_internal_ip() {
     printf '%s\n' '169.254.1.2'
 }
 
+container_metadata_key() {
+    local kind="$1" example line key
+    while IFS= read -r example; do
+        [ -f "$example" ] || continue
+        while IFS= read -r line; do
+            [[ "$line" == "#container-${kind}-key:"* ]] || continue
+            key="$(trim "${line#*:}")"
+            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+            printf '%s\n' "$key"
+            return 0
+        done < "$example"
+    done < <(config_example_files)
+}
+
 configure_container_name() {
-    local example default_name="" value="${CONFIG_CONTAINER_NAME:-}"
+    local example default_name="" value="${CONFIG_CONTAINER_NAME:-}" name_key
+    name_key="$(container_metadata_key name || true)"
+    if [ -n "$name_key" ]; then
+        default_name="$(config_value "$name_key" || true)"
+        if [ -z "$default_name" ]; then
+            while IFS= read -r example; do
+                default_name="$(read_kv_file "$example" "$name_key" || true)"
+                [ -z "$default_name" ] || break
+            done < <(config_example_files)
+        fi
+        value="${value:-$default_name}"
+        [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
+        CONTAINER_NAME="$value"
+        return 0
+    fi
 
     while IFS= read -r example || [ -n "$example" ]; do
         [ -f "$example" ] || continue
@@ -1279,6 +1307,7 @@ configure_from_example() {
     declare -A repeat_group_fields=()
     declare -A repeat_key_groups=()
     declare -A repeat_optional_complete=()
+    declare -A repeat_optional_group=()
     declare -A repeat_freeform=()
     declare -A repeat_unique=()
     declare -A repeat_one_true=()
@@ -1338,6 +1367,14 @@ configure_from_example() {
 
     while IFS= read -r line <&7; do
         stripped="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$stripped" == \#repeat-optional-group:* ]]; then
+            directive="$(trim "${stripped#\#repeat-optional-group:}")"
+            for target_key in $directive; do
+                [[ "$target_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+                repeat_optional_group[$target_key]=1
+            done
+            continue
+        fi
         if [[ "$stripped" == \#repeat-optional-complete:* ]]; then
             directive="$(trim "${stripped#\#repeat-optional-complete:}")"
             for target_key in $directive; do
@@ -1432,7 +1469,7 @@ configure_from_example() {
         fi
 
         mode="new"
-        if [ "$complete" = "true" ]; then
+        if [ "$complete" = "true" ] || [[ -n "${repeat_optional_group[$group]+x}" ]]; then
             default_mode="skip"
             while :; do
                 if [ -t 0 ]; then
@@ -2438,7 +2475,12 @@ existing_image() {
 
 project_image() {
     local upper_name
-    local configured
+    local configured image_key
+    image_key="$(container_metadata_key image || true)"
+    if [ -n "$image_key" ]; then
+        configured="$(config_value "$image_key" || true)"
+        if [ -n "$configured" ]; then printf '%s\n' "$configured"; return 0; fi
+    fi
     upper_name="$(printf '%s' "$PROJECT_NAME" | tr '[:lower:]-' '[:upper:]_')"
 
     configured="${CONFIG_CONTAINER_IMAGE:-}"
@@ -2697,7 +2739,7 @@ generate_container_files() {
             key="$(trim "${entry%%=*}")"
             value="$(config_value "$key" || true)"
 
-            if [[ "$key" =~ ^ADDITIONAL_LINE(_[0-9]+)?$ ]]; then
+            if [[ "$key" =~ (^|_)ADDITIONAL_LINE(_[0-9]+)?$ ]]; then
                 case "${value,,}" in ""|blank|null) ;; *) add_unique "$value" additional_lines ;; esac
                 continue
             fi
@@ -2708,7 +2750,7 @@ generate_container_files() {
                 prefix="${key%_PUBLISH_PORT}"
                 enabled_key="${prefix}_ENABLED"
                 if enabled_value="$(config_value "$enabled_key")"; then
-                    [ "$enabled_value" = "true" ] || continue
+                    case "${enabled_value,,}" in true|1) ;; *) continue ;; esac
                 fi
                 case "${value,,}" in ""|blank|null) continue ;; esac
                 internal_key="${prefix}_PORT"

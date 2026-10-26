@@ -18,18 +18,17 @@ class ProvisionError(Exception):
 
 class Provisioner:
     def __init__(self, values, key, transport=None):
-        match = re.fullmatch(r"USER_LITELLM_BEARER(_\d{2,})?", key)
+        match = re.fullmatch(r"LITELLM_MCP_SWITCHER_KEY_BEARER(_\d{2,})?", key)
         if not match:
             raise ProvisionError("Unsupported configuration field")
         suffix = match[1] or ""
         self.values, self.key = values, key
-        self.name = (values.get("USER_NAME" + suffix) or "").strip()
-        bearer = (values.get("USER_SWITCHER_BEARER" + suffix) or "").strip()
-        csv = values.get("USER_ALLOWED_MCPS" + suffix) or ""
+        self.name = (values.get("LITELLM_MCP_SWITCHER_KEY_NAME" + suffix) or "").strip()
+        csv = values.get("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS" + suffix) or ""
         self.aliases = list(dict.fromkeys(a.strip() for a in csv.split(",") if a.strip()))
-        self.always = [a.strip() for a in (values.get("USER_ALWAYS_ON_MCPS" + suffix) or "").split(",") if a.strip()]
-        base = (values.get("LITELLM_API_BASE_URL") or "").strip().rstrip("/")
-        admin = values.get("LITELLM_MASTER_KEY") or values.get("LITELLM_ADMIN_VIRTUAL_KEY") or ""
+        self.always = [a.strip() for a in (values.get("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS" + suffix) or "").split(",") if a.strip()]
+        base = (values.get("LITELLM_MCP_SWITCHER_API_BASE_URL") or "").strip().rstrip("/")
+        admin = values.get("LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY") or ""
         try:
             url = urlsplit(base)
             port = url.port or {"http": 80, "https": 443}.get(url.scheme)
@@ -40,12 +39,12 @@ class Provisioner:
             raise ProvisionError("Configure a LiteLLM HTTP(S) URL and valid port first")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", self.name):
             raise ProvisionError("Configure a valid user name first")
-        if min(len(admin), len(bearer)) < 24 or "\n" in admin or "\r" in admin:
-            raise ProvisionError("Configure the administrative LiteLLM key and Switcher bearer first")
+        if len(admin) < 24 or "\n" in admin or "\r" in admin:
+            raise ProvisionError("Configure the administrative LiteLLM key first")
         if not self.aliases or any(not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", a) for a in self.aliases):
-            raise ProvisionError("Configure USER_ALLOWED_MCPS with existing MCP aliases first")
+            raise ProvisionError("Configure LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS with existing MCP aliases first")
         if not set(self.always) <= set(self.aliases):
-            raise ProvisionError("Always-on MCPs must be included in USER_ALLOWED_MCPS")
+            raise ProvisionError("Always-on MCPs must be included in LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS")
         self.team_id = str(uuid.uuid5(uuid.NAMESPACE_URL, base + "/mcp-switcher/" + self.name))
         self.marker = {"mcp_switcher_owner": self.name, "mcp_switcher_setup": "v1"}
         self.client = httpx.Client(base_url=base, headers={"Authorization": "Bearer " + admin},
@@ -110,7 +109,7 @@ def main(argv=None):
     parser.add_argument("mode", choices=("check", "create"))
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--config-file", default="config.conf")
-    parser.add_argument("--key", default="USER_LITELLM_BEARER")
+    parser.add_argument("--key", default="LITELLM_MCP_SWITCHER_KEY_BEARER")
     args = parser.parse_args(argv)
     values = {}
     for path in (args.config_file, args.env_file):

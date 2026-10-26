@@ -13,6 +13,8 @@ LiteLLM connects to the upstream servers and executes their tools. The Switcher 
 | MCP client | Displaying tools, choosing calls, and reloading its tool catalog after changes |
 | Upstream MCP servers | Executing their own operations with the credentials registered in LiteLLM |
 
+An **orchestrator** can instead connect directly to the Switcher and control several configured LiteLLM keys. It chooses a target by name, then manages that key’s selection and projects. The target agents keep their own LiteLLM connections and do not need a Switcher login.
+
 The Switcher does not route LLM requests or change model settings. Give it dedicated MCP keys, separate from existing LLM keys.
 
 ## How one connection works
@@ -57,19 +59,20 @@ Applying a selection **replaces the complete active selection**. It affects ever
 
 An administrator can allow all tools from a server or a specific subset. The user can narrow that allowance further, but cannot expand it. A read-only selection means explicitly choosing appropriate upstream tools; there is no universal read-only transformation for arbitrary MCP tools. The upstream bearer still determines which account and permissions those calls have.
 
-## Three credentials and their roles
+## Credentials and their roles
 
-For a deployment with one user, there are three distinct credentials:
+Each credential has a separate purpose:
 
 | Configuration variable | Where is it used? | Authority |
 |---|---|---|
-| `LITELLM_ADMIN_VIRTUAL_KEY` | Switcher backend → LiteLLM management API; also administrative login to the Switcher | Inspect and update managed users' MCP ceilings and selections |
-| `USER_SWITCHER_BEARER` | User → Switcher Web UI, REST API, or MCP endpoint | Manage only this configured user's selection and projects |
-| `USER_LITELLM_BEARER` | User's AI client → LiteLLM MCP endpoint | Invoke the upstream tools enabled for the assigned key |
+| `LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY` | Switcher backend → LiteLLM management API; also administrative login to the Switcher | Inspect and update managed users' MCP ceilings and selections |
+| `LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER` | User → Switcher Web UI, REST API, or MCP endpoint | Manage only this configured user's selection and projects |
+| `LITELLM_MCP_SWITCHER_KEY_BEARER` | User's AI client → LiteLLM MCP endpoint | Invoke the upstream tools enabled for the assigned key |
+| `LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER` | Orchestrator client → Switcher MCP, Web UI or REST API | Manage the selection and projects of configured target keys, within their existing ceilings |
 
-Use a dedicated management virtual key, never LiteLLM's master key. The administrator credential is shared by the Switcher backend; each additional user gets their own Switcher/LiteLLM bearer pair.
+Use a dedicated management virtual key, never LiteLLM's master key. The administrator credential is shared by the Switcher backend; each managed target gets its own LiteLLM key. A personal Switcher login is optional when an orchestrator manages that target.
 
-The server-side configuration binds a Switcher login to its assigned LiteLLM key. A user request cannot supply a different target key or manage another user's projects. Management credentials, user key values, and upstream registry credentials are never returned in state or discovery responses. The project database stores no bearer tokens.
+The server-side configuration binds a Switcher login to its assigned LiteLLM key. A personal login cannot select a different target. An orchestrator can select only the key names explicitly assigned to it in the private configuration. Management credentials, user key values, and upstream registry credentials are never returned in state or discovery responses. The project database stores no bearer tokens.
 
 ### Upstream identities are separate aliases
 
@@ -95,46 +98,46 @@ An OAuth frontend may authenticate the client and map its identity to the approp
 
 ### Configuration files
 
-Copy [`env.example`](env.example) to `.env` and [`config.conf_example`](config.conf_example) to `config.conf`. Both real files are git-ignored.
+Use [`env.example`](env.example), [`config.conf_example`](config.conf_example) and [`container.example`](container.example) through `./config.sh`, or create the corresponding private files manually with actual values. The `example: openssl …` text is setup metadata, not a bearer. Real configuration files are git-ignored.
 
 | File | Contents |
 |---|---|
-| `.env` | Management key, user bearer pairs, always-on aliases, and database configuration |
+| `.env` | Management key, managed keys, personal logins, orchestrators, always-on aliases, and database configuration |
 | `config.conf` | LiteLLM address, request timeout, listener switches, and Web UI refresh default |
 | [`container.example`](container.example) | Image reference, optional host publication ports, and additional container settings |
 
 Run `./config.sh` to use the New/Skip configuration flow and generate Compose/Quadlet files. For each user, enter a Switcher bearer or let OpenSSL generate one. LiteLLM generates the separate LiteLLM virtual key. `config.sh` and `optional_persistence.sh` are shared convention snapshots from `safrano9999/SCRIPTS/safrano9999/config`; use those sources for future synchronization.
 
-Each user is one repeat group:
+Each managed LiteLLM key is one repeat group:
 
 ```dotenv
-#repeat-group: USER suffix02 USER_NAME USER_SWITCHER_BEARER USER_ALLOWED_MCPS USER_LITELLM_BEARER USER_ALWAYS_ON_MCPS
-#repeat-optional-complete: USER_ALLOWED_MCPS USER_ALWAYS_ON_MCPS
-#repeat-unique: USER_NAME
-USER_NAME=rafael
+#repeat-group: LITELLM_MCP_SWITCHER_KEY suffix02 LITELLM_MCP_SWITCHER_KEY_NAME LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS LITELLM_MCP_SWITCHER_KEY_BEARER LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS
+#repeat-optional-complete: LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS
+#repeat-unique: LITELLM_MCP_SWITCHER_KEY_NAME
+LITELLM_MCP_SWITCHER_KEY_NAME=rafael
 #secret
-USER_SWITCHER_BEARER=example: openssl rand -hex 32
-USER_ALLOWED_MCPS=tasks_personal,documents_personal
+LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER=example: openssl rand -hex 32
+LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS=tasks_personal,documents_personal
 #secret
 #create-with: litellm_add_virtual.py
-USER_LITELLM_BEARER=
-USER_ALWAYS_ON_MCPS=
+LITELLM_MCP_SWITCHER_KEY_BEARER=
+LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS=
 ```
 
-New creates `_02`, `_03`, and subsequent groups; Skip stops adding users. Duplicate names, duplicate assigned keys, duplicate login tokens, and incomplete groups are rejected. There is no admin-name variable.
+New creates `_02`, `_03`, and subsequent groups; Skip preserves the configured groups. Leave `LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER` blank for an orchestrator-only target. Duplicate names, duplicate assigned keys, duplicate login tokens, and incomplete groups are rejected. There is no admin-name variable.
 
 ### Create a LiteLLM key during setup
 
-Install the Python package first (`python3 -m pip install .`). Before running `./config.sh`, set the reachable `LITELLM_API_BASE_URL` in `config.conf` or the environment. Enter the administrative key, user name, Switcher bearer and allowed MCP aliases when prompted. If an authenticated registry request returns HTTP 200 and every alias resolves uniquely, the LiteLLM bearer prompt offers:
+Install the Python package first (`python3 -m pip install .`). Before running `./config.sh`, set the reachable `LITELLM_MCP_SWITCHER_API_BASE_URL` in `config.conf` or the environment. Enter the administrative key, user name, Switcher bearer and allowed MCP aliases when prompted. If an authenticated registry request returns HTTP 200 and every alias resolves uniquely, the LiteLLM bearer prompt offers:
 
 ```text
 (1) Enter existing LiteLLM bearer
 (2) Create new virtual key in LiteLLM
 ```
 
-Choosing **2** creates a dedicated team whose MCP ceiling is `USER_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. The CSV is a setup input; subsequent permission changes are managed in LiteLLM and the Switcher. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
+Choosing **2** creates a dedicated team whose MCP ceiling is `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. The CSV is a setup input; subsequent permission changes are managed in LiteLLM and the Switcher. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
 
-Provisioning uses `LITELLM_ADMIN_VIRTUAL_KEY`. It needs `GET /v1/mcp/server`, `GET /team/info`, `POST /team/new`, `POST /team/update` and `POST /key/generate` permissions. Alternatively, supply `LITELLM_MASTER_KEY` temporarily in the setup process environment; the helper does not save it. The runtime management key still needs the permissions listed below to manage the newly created team and key.
+Provisioning uses `LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY`. It needs `GET /v1/mcp/server`, `GET /team/info`, `POST /team/new`, `POST /team/update` and `POST /key/generate` permissions. The runtime management key still needs the permissions listed below to manage the newly created team and key.
 
 If LiteLLM cannot be reached or the inputs are incomplete, manual bearer entry remains available. An interrupted setup can continue with its own empty team; if that team already has a key, use the existing bearer. Always-on aliases must already be registered and included in the ceiling when configured. Creating a key does not register upstream MCP servers.
 
@@ -148,20 +151,20 @@ For Rafael, register a LiteLLM alias such as:
 |---|---|
 | Alias | `switcher_rafael` |
 | Upstream URL | `http://litellm-mcp-switcher:8000/mcp` |
-| Upstream authentication | Rafael's `USER_SWITCHER_BEARER` |
+| Upstream authentication | Rafael's `LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER` |
 | Administrative ceiling and initial selection | Include this alias with all its tools |
 
 Then configure:
 
 ```dotenv
-USER_ALWAYS_ON_MCPS=switcher_rafael
+LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS=switcher_rafael
 ```
 
-The client continues to use `USER_LITELLM_BEARER` at LiteLLM. LiteLLM uses `USER_SWITCHER_BEARER` only for the upstream call to Rafael's Switcher tools. For example, LiteLLM may expose `switcher_rafael-current_state` alongside `vikunja_rafael-projects_list`.
+The client continues to use `LITELLM_MCP_SWITCHER_KEY_BEARER` at LiteLLM. LiteLLM uses `LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER` only for the upstream call to Rafael's Switcher tools. For example, LiteLLM may expose `switcher_rafael-current_state` alongside `vikunja_rafael-projects_list`.
 
 Always-on aliases retain **all their tools** when applying selections, saving projects, clearing optional servers, or updating ceilings. The Web UI marks them **Always enabled** and disables their checkboxes. REST and MCP calls enforce the same protection. This prevents the user from removing the controls needed to switch servers back on.
 
-Aliases must exist uniquely in the registry and have unrestricted tools in the team's ceiling; the Switcher does not bypass missing grants. Each user needs a separate alias authenticated with their own Switcher bearer. Never share one user's control alias with another user. An administrator can change this protection through private configuration. Leave `USER_ALWAYS_ON_MCPS` blank if no aliases should be protected.
+Aliases must exist uniquely in the registry and have unrestricted tools in the team's ceiling; the Switcher does not bypass missing grants. Each user needs a separate alias authenticated with their own Switcher bearer. Never share one user's control alias with another user. An administrator can change this protection through private configuration. Leave `LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS` blank if no aliases should be protected.
 
 ### LiteLLM management permissions
 
@@ -178,7 +181,7 @@ The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` m
 
 ### Database and listeners
 
-`MCP_SWITCHER_DB_BACKEND` selects `sqlite`, `postgres`, or `mariadb` through SQLAlchemy. Alembic runs migrations before listeners start. Network database table prefixes are validated.
+`LITELLM_MCP_SWITCHER_DB_BACKEND` selects `sqlite`, `postgres`, or `mariadb` through SQLAlchemy. Alembic runs migrations before listeners start. Network database table prefixes are validated.
 
 With SQLite, `config.sh` omits/blanks network database fields and generates the persistent mount using the existing `*_DB_BACKEND` named-volume convention. The fixed application directory is `/opt/f24sales/litellm-mcp-switcher/sqlite`. No JSON state file or separately configured SQLite path is required. The explicit deployment Quadlet provides an equivalent volume; do not install generated and explicit Quadlets with the same container name.
 
@@ -186,11 +189,48 @@ The database holds owned projects, their selections and versions, and operation 
 
 | Setting | Enabled behavior |
 |---|---|
-| `WEBUI_ENABLED=1` | Web UI and REST API on `0.0.0.0:8080` |
-| `MCP_ENABLED=1` | Streamable HTTP MCP on `0.0.0.0:8000/mcp` |
-| `WEBUI_REFRESH_SECONDS=30` | Default Web UI state refresh interval |
+| `LITELLM_MCP_SWITCHER_WEBUI_ENABLED=1` | Web UI and REST API on `0.0.0.0:8080` |
+| `LITELLM_MCP_SWITCHER_MCP_ENABLED=1` | Streamable HTTP MCP on `0.0.0.0:8000/mcp` |
+| `LITELLM_MCP_SWITCHER_WEBUI_REFRESH_SECONDS=30` | Default Web UI state refresh interval |
 
-Either listener can be disabled independently; disabling both is an error. Blank `WEBUI_PUBLISH_PORT` or `MCP_PUBLISH_PORT` disables that host publication without disabling the internal listener. With shared Podman networking and Caddy routing, neither needs a published host port. `LITELLM_API_BASE_URL` must be reachable from the Switcher; internal Podman DNS is preferred when both containers share a network.
+Either listener can be disabled independently; disabling both is an error. Blank `LITELLM_MCP_SWITCHER_WEBUI_PUBLISH_PORT` or `LITELLM_MCP_SWITCHER_MCP_PUBLISH_PORT` disables that host publication without disabling the internal listener. With shared Podman networking and Caddy routing, neither needs a published host port. `LITELLM_MCP_SWITCHER_API_BASE_URL` must be reachable from the Switcher; internal Podman DNS is preferred when both containers share a network.
+
+## Orchestrator: manage several keys from one connection
+
+Configure managed key groups first. Then add an orchestrator with three fields:
+
+```dotenv
+LITELLM_MCP_SWITCHER_ORCHESTRATOR_NAME=orchestrator
+LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER=<separate-openssl-generated-login-token>
+LITELLM_MCP_SWITCHER_ORCHESTRATOR_KEY_NAMES=main,research,coding
+```
+
+The CSV references `LITELLM_MCP_SWITCHER_KEY_NAME` values, not token strings or upstream MCP aliases. The first name is the default target. Additional orchestrators use `_02`, `_03`, and so on. `config.sh` offers a separate **New/Skip** step for orchestrators and can generate their login tokens with `openssl rand -hex 32`. Skipping the optional group leaves it disabled.
+
+Connect the orchestrator client directly to the Switcher's `http://<switcher>:8000/mcp`, or its HTTPS frontend, with its orchestrator bearer. It need not connect through LiteLLM or have an always-on alias of its own. Always-on aliases belong to the managed target keys and still apply when an orchestrator changes their selections.
+
+An orchestrator receives **seven tools**: the six personal tools below, plus `choose_bearer`. This is an explicit role, even when it manages only one key.
+
+1. Call `choose_bearer` without arguments to list permitted names and open a chooser session with the first key selected. Alternatively, supply `key_name` to start with another allowed target.
+2. Keep the returned `session_id`. Pass it to `current_state`, `discover_tools`, `apply_selection`, project tools and `refresh_tools`.
+3. To switch targets, call `choose_bearer(key_name="research", session_id="...")`. Read `current_state` again before applying a selection.
+4. To inspect the current target without changing it, call `choose_bearer(session_id="...")`.
+
+Each chooser session has its own target. Two clients using the same orchestrator bearer can manage different keys concurrently. Session IDs are bound to the authenticated orchestrator; calls without a valid session are rejected. After a server restart or session expiration, open a new chooser session. Responses identify `target_key` but never expose bearer values.
+
+The Web UI shows a target dropdown for orchestrator logins. Each page keeps its own choice. REST callers select the target explicitly with `?key_name=research` on the normal `/api` endpoints; omission selects the first configured key. Projects remain owned by the target key, so its personal login and assigned orchestrators see the same presets.
+
+The injected environment is the source of truth for identities and assignments. Restart the Switcher after configuration changes. There is no environment-refresh tool; current MCP permissions and registry entries are read from LiteLLM through the existing state/discovery tools.
+
+### Upgrading an existing installation
+
+Stop the Switcher, install the new package, and rename existing fields once:
+
+```sh
+litellm-mcp-switcher-migrate-config /path/to/.env /path/to/config.conf /path/to/container.conf
+```
+
+Include only files that exist. The helper preserves values, suffixes and comments, rejects conflicting fields, and writes private files without printing credentials. Existing database names/users and custom prefixes stay unchanged. The former default table prefix `mcp_switcher` becomes `litellm_mcp_switcher`; startup migrates those tables in place while retaining projects, owners and operation state. Keep the existing SQLite volume and file mounted. The optional LiteLLM notification adapter's setting is now `LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS`; rename it in LiteLLM's configuration when updating that adapter.
 
 ## Using the Web UI and MCP tools
 
@@ -230,12 +270,12 @@ Updating permissions and updating the client's displayed tool catalog are separa
 2. LiteLLM uses the updated selection when serving tool lists and checking access.
 3. The MCP client must request a fresh `tools/list` to learn the new tool catalog.
 
-A successful Apply confirms **server-side permissions**. It does not confirm that the client has reloaded tools. A client may still display old names; its cached catalog does not restore revoked access. `WEBUI_REFRESH_SECONDS` refreshes only the Switcher Web UI and is not a delay or polling schedule for AI clients.
+A successful Apply confirms **server-side permissions**. It does not confirm that the client has reloaded tools. A client may still display old names; its cached catalog does not restore revoked access. `LITELLM_MCP_SWITCHER_WEBUI_REFRESH_SECONDS` refreshes only the Switcher Web UI and is not a delay or polling schedule for AI clients.
 
 The optional [LiteLLM notification adapter](integrations/litellm/README.md) can be bind-mounted into LiteLLM and loaded through its worker startup hook. Set this in **LiteLLM's environment**, using the adapter's [env.example](integrations/litellm/env.example):
 
 ```dotenv
-LITELLM_MCP_AUTO_TOOL_NOTIFICATIONS=true
+LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS=true
 ```
 
 With the adapter installed, successful MCP permission updates emit `notifications/tools/list_changed` to affected connections. The Switcher's `refresh_tools` MCP tool can explicitly send that notification without changing access, projects, or model settings. Notifications are scoped to the assigned LiteLLM key; this is an adapter feature, not a built-in LiteLLM environment setting.
@@ -284,7 +324,7 @@ Project writes also take `name` and, for updates, `version`. Unknown request fie
 
 ## Concurrent changes and uncertain writes
 
-Project versions prevent lost project updates. State revisions include the ceiling and effective active selection. Database operation leases serialize Switcher writes for the same user across access methods. Unrelated key/object-permission fields are preserved.
+Project versions prevent lost project updates. State revisions include the target key, ceiling and effective active selection. A revision from one target cannot be used to update another. Database operation leases serialize Switcher writes for the same user across access methods. Unrelated key/object-permission fields are preserved.
 
 The local database and LiteLLM are separate systems, so a single distributed transaction is not claimed. A write is successful only after read-back verification. Timeouts become uncertain operations and are reconciled against LiteLLM; no write is blindly retried. A crashed pending operation is reconciled after its bounded lease expires (12 upstream request timeouts plus 60 seconds). If the observed state differs, review it before issuing a new change.
 
@@ -320,7 +360,7 @@ The repository `.github/workflows` file is a synchronized copy.
 
 ## Verification
 
-CI checks SQLite, PostgreSQL and MariaDB; user isolation; stale project versions; MCP tool visibility and cached-call denial; empty scopes; revocation; preservation of independent key settings; uncertain writes; process-crash reconciliation; failed discovery; and browser draft-refresh conflicts. The Alpine candidate is tested with both listeners, each listener separately, graceful shutdown and persistent state across restart before publication.
+CI checks SQLite, PostgreSQL and MariaDB; migration of existing projects; concurrent orchestrator sessions; target-scoped writes and chooser visibility; user isolation; stale project versions; MCP tool visibility and cached-call denial; empty scopes; revocation; preservation of independent key settings; uncertain writes; process-crash reconciliation; failed discovery; and browser draft-refresh conflicts. The Alpine candidate is tested with both listeners, each listener separately, graceful shutdown and persistent state across restart before publication.
 
 ## References
 

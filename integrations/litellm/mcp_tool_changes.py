@@ -212,9 +212,9 @@ async def install():
 
     if getattr(proxy_server.app.state, "f24_mcp_tool_changes", None) is not None:
         return
-    enabled = os.environ.get("LITELLM_MCP_AUTO_TOOL_NOTIFICATIONS", "false").strip().lower()
+    enabled = os.environ.get("LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS", "false").strip().lower()
     if enabled not in {"false", "true"}:
-        raise RuntimeError("LITELLM_MCP_AUTO_TOOL_NOTIFICATIONS must be true or false")
+        raise RuntimeError("LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS must be true or false")
     if int(os.environ.get("NUM_WORKERS", "1")) != 1:
         raise RuntimeError("MCP tool notifications require one worker; shared fan-out is not configured")
     if not hasattr(gateway.server, "middleware") or not callable(hash_token_if_needed):

@@ -1,14 +1,16 @@
 #container-command: image
-CONTAINER_NAME=litellm-mcp-switcher
-IMAGE=ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
+#container-name-key: LITELLM_MCP_SWITCHER_CONTAINER_NAME
+#container-image-key: LITELLM_MCP_SWITCHER_IMAGE
+LITELLM_MCP_SWITCHER_CONTAINER_NAME=litellm-mcp-switcher
+LITELLM_MCP_SWITCHER_IMAGE=ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
 
-# Leave blank to disable host publication; internal enablement is separate
-#container-port: WEBUI_PUBLISH_PORT 8080
-WEBUI_PUBLISH_PORT=8080
+# Leave blank to disable host publication; internal enablement is separate.
+#container-port: LITELLM_MCP_SWITCHER_WEBUI_PUBLISH_PORT 8080
+LITELLM_MCP_SWITCHER_WEBUI_PUBLISH_PORT=8080
 
-#container-port: MCP_PUBLISH_PORT 8000
-MCP_PUBLISH_PORT=8000
+#container-port: LITELLM_MCP_SWITCHER_MCP_PUBLISH_PORT 8000
+LITELLM_MCP_SWITCHER_MCP_PUBLISH_PORT=8000
 
-#repeat-group: ADDITIONAL_LINE suffix02 ADDITIONAL_LINE
-#repeat-freeform: ADDITIONAL_LINE
-ADDITIONAL_LINE=
+#repeat-group: LITELLM_MCP_SWITCHER_ADDITIONAL_LINE suffix02 LITELLM_MCP_SWITCHER_ADDITIONAL_LINE
+#repeat-freeform: LITELLM_MCP_SWITCHER_ADDITIONAL_LINE
+LITELLM_MCP_SWITCHER_ADDITIONAL_LINE=
