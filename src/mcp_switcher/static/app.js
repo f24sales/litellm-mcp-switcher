@@ -28,6 +28,8 @@ function selectionChanged() {
   updateActions(); renderCards();
 }
 function updateActions() {
+  for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
+  $('target-key').disabled = busy;
   $('conflict').hidden = !draft.conflict;
   $('draft-state').textContent = draft.dirty ? 'Unsaved selection' : 'In sync';
   $('selection-count').textContent = `${Object.keys(draft.selection.servers).length} selected`;
