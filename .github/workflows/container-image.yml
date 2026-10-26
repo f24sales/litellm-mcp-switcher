@@ -152,17 +152,17 @@ jobs:
               -v "$GITHUB_WORKSPACE/.github/scripts:/ci-tests:ro" \
               -e LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY=ci-admin-00000000000000000000000000000000 \
               -e LITELLM_MCP_SWITCHER_BEARER_ALIAS=ci-user \
+              -e LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS=fixture \
               -e LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER=ci-switcher-00000000000000000000000000000000 \
               -e LITELLM_MCP_SWITCHER_KEY_BEARER=ci-litellm-00000000000000000000000000000000 \
               -e LITELLM_MCP_SWITCHER_API_BASE_URL=http://127.0.0.1:4000 \
               -e LITELLM_MCP_SWITCHER_ORCHESTRATOR_NAME=ci-orchestrator \
               -e LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER=ci-orchestrator-00000000000000000000000000 \
               -e LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER_ALIASES=ci-user \
-              -e LITELLM_MCP_SWITCHER_WEBUI_ENABLED="$web" -e LITELLM_MCP_SWITCHER_MCP_ENABLED="$mcp" "mcp-switcher-candidate:${GITHUB_SHA}")
-            docker exec -d "$container" python3 /ci-tests/fake_upstream.py
+              -e LITELLM_MCP_SWITCHER_WEBUI_ENABLED="$web" -e LITELLM_MCP_SWITCHER_MCP_ENABLED="$mcp" \
+              --entrypoint python3 "mcp-switcher-candidate:${GITHUB_SHA}" /ci-tests/run_fixture.py)
             docker exec "$container" python3 /ci-tests/smoke.py
             docker restart "$container" >/dev/null
-            docker exec -d "$container" python3 /ci-tests/fake_upstream.py
             docker exec "$container" python3 /ci-tests/smoke.py restart
             docker stop --time 20 "$container" >/dev/null
             [ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0 ]

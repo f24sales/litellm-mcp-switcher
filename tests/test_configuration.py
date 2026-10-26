@@ -68,10 +68,12 @@ def test_cross_user_bearer_role_collision_is_rejected(monkeypatch, tmp_path):
 def test_always_on_aliases_belong_to_each_repeat_group(monkeypatch, tmp_path):
     configure(monkeypatch, tmp_path)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "switcher_alice, other_control")
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", "switcher_alice, other_control")
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_BEARER_ALIAS_02", "bob")
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER_02", "bob-switcher-" + "s" * 40)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_BEARER_02", "bob-litellm-" + "l" * 40)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS_02", "switcher_bob")
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS_02", "switcher_bob")
     _, users = load_configuration()
     assert users[1].always_on_mcps == ("switcher_alice", "other_control")
     assert users[2].always_on_mcps == ("switcher_bob",)
@@ -82,4 +84,16 @@ def test_invalid_always_on_aliases_rejected(monkeypatch, tmp_path, aliases):
     configure(monkeypatch, tmp_path)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", aliases)
     with pytest.raises(ValueError, match="aliases"):
+        load_configuration()
+
+
+def test_allowed_aliases_blank_and_always_on_conflict(monkeypatch, tmp_path):
+    configure(monkeypatch, tmp_path)
+    _, users = load_configuration()
+    assert users[1].allowed_mcps == ()
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", "tasks, docs")
+    _, users = load_configuration()
+    assert users[1].allowed_mcps == ("tasks", "docs")
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "other")
+    with pytest.raises(ValueError, match="included"):
         load_configuration()

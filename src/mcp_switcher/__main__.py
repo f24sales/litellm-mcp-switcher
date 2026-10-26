@@ -11,6 +11,8 @@ from .db import Database
 from .litellm import LiteLLM
 from .mcp import create_mcp
 from .service import Service
+from .startup import prune_configured_access
+from .models import Problem
 from .web import create_web
 
 
@@ -28,6 +30,12 @@ async def serve():
     db.initialize_owners([u.name for u in users if u.litellm_key and not u.admin])
     upstream = LiteLLM(settings)
     service = Service(db, upstream, users, settings)
+    try:
+        await prune_configured_access(service)
+    except BaseException:
+        await upstream.close()
+        db.close()
+        raise
     apps = []
     if settings.webui_enabled:
         apps.append((create_web(service, users), 8080))
@@ -64,7 +72,7 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     try:
         asyncio.run(serve())
-    except (ValueError, RuntimeError):
+    except (ValueError, RuntimeError, Problem):
         # Configuration may contain secrets. Do not interpolate raw validation exceptions.
         logging.error("Switcher startup failed; verify configuration and enabled listeners")
         raise SystemExit(1) from None

@@ -6,6 +6,7 @@ import os
 import threading
 import tempfile
 from pathlib import Path
+from dataclasses import replace
 
 import httpx
 import uvicorn
@@ -18,6 +19,7 @@ from mcp_switcher.litellm import LiteLLM
 from mcp_switcher.mcp import create_mcp
 from mcp_switcher.provision import ProvisionError, Provisioner
 from mcp_switcher.service import Service
+from mcp_switcher.startup import prune_configured_access
 
 
 async def provision_contract(req, master, sid):
@@ -112,6 +114,18 @@ async def always_on_contract(req, master, key, optional_id):
                     "name": "current_state", "arguments": {}}, key=key)
                 assert not result.get("isError"), result
             print("Always-on contract: real user Switcher tools remain callable through LiteLLM after clear-all and tool restriction")
+            # A configured allow-list revokes the control reference without deleting its registration.
+            managed = replace(user, always_on_mcps=(), allowed_mcps=("contract",))
+            service.users[user.name] = managed
+            registry_before = await upstream.inventory()
+            await prune_configured_access(service)
+            info, _, ceiling, active = await upstream.scope(managed, await upstream.inventory())
+            assert ceiling.servers == {optional_id: None} and active.servers == {}
+            assert info["object_permission"]["mcp_servers"] == ["no-mcp-servers"]
+            assert await upstream.inventory() == registry_before
+            await req("GET", "/mcp-rest/tools/list?server_id=" + control_id, key=key, expected=403)
+            await prune_configured_access(service)
+            print("Startup cleanup contract: reference revoked, explicit empty selection, registry preserved, repeat succeeds")
         finally:
             server.should_exit = True
             await asyncio.wait_for(task, timeout=15)

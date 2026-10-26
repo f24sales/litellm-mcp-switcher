@@ -54,6 +54,8 @@ if web:
     status, content = request("http://127.0.0.1:8080/api/state", key)
     assert status == 200, content
     state = json.loads(content)
+    assert state["ceiling"]["servers"] == {"fixture": None}, state
+    assert "obsolete" not in state["active"]["servers"], state
     if len(sys.argv) > 1 and sys.argv[1] == "restart":
         assert any(p["name"] == "CI smoke project" for p in state["projects"]), state
     else:

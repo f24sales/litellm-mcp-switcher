@@ -9,7 +9,7 @@ DENY = "no-mcp-servers"
 MCP_FIELDS = {"mcp_servers", "mcp_access_groups", "mcp_tool_permissions", "mcp_toolsets"}
 
 
-def permission_selection(permission: dict, inventory: list[dict]) -> Selection:
+def permission_selection(permission: dict, inventory: list[dict], *, ignore_missing=False) -> Selection:
     """Resolve stored ids/names/aliases; never interpret an empty scope as all."""
     if permission.get("mcp_access_groups") or permission.get("mcp_toolsets"):
         raise Problem(409, "This key or team uses additive MCP groups/toolsets; use a dedicated explicit scope")
@@ -18,11 +18,11 @@ def permission_selection(permission: dict, inventory: list[dict]) -> Selection:
     ids = permission.get("mcp_servers") or []
     if DENY in ids:
         return Selection()
-    if any(x not in names for x in ids):
+    if not ignore_missing and any(x not in names for x in ids):
         raise Problem(409, "The MCP scope contains an unresolved server; reconcile the LiteLLM registry")
     tools = permission.get("mcp_tool_permissions") or {}
     normalized_tools = {names[k]: v for k, v in tools.items() if k in names}
-    return Selection(servers={names[x]: normalized_tools.get(names[x]) for x in ids})
+    return Selection(servers={names[x]: normalized_tools.get(names[x]) for x in ids if x in names})
 
 
 def merge_permission(existing: dict, selection: Selection) -> dict:
@@ -74,7 +74,7 @@ class LiteLLM:
         return [{k: s.get(k) for k in ("server_id", "server_name", "alias", "description")}
                 for s in data]
 
-    async def scope(self, identity, inventory):
+    async def scope(self, identity, inventory, *, ignore_missing=False):
         key = await self.request("GET", "/key/info", token=identity.litellm_key)
         info = key["info"]
         if not info.get("team_id"):
@@ -84,8 +84,8 @@ class LiteLLM:
             raise Problem(409, "The dedicated MCP team must contain exactly one key")
         key_permission = info.get("object_permission") or {}
         team_permission = team["team_info"].get("object_permission") or {}
-        ceiling = permission_selection(team_permission, inventory)
-        active = permission_selection(key_permission, inventory)
+        ceiling = permission_selection(team_permission, inventory, ignore_missing=ignore_missing)
+        active = permission_selection(key_permission, inventory, ignore_missing=ignore_missing)
         # Empty key scope would inherit the team: show its real effective state.
         if not key_permission.get("mcp_servers") and not key_permission.get("mcp_tool_permissions"):
             active = ceiling

@@ -22,6 +22,7 @@ class Identity:
     admin: bool = False
     always_on_mcps: tuple[str, ...] = ()
     key_names: tuple[str, ...] = ()
+    allowed_mcps: tuple[str, ...] = ()
 
     @property
     def orchestrator(self):
@@ -121,7 +122,10 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
             raise ValueError("Each managed key requires a complete, unique LiteLLM bearer")
         keys.add(key)
         identity = Identity(group["NAME"], group["SWITCHER_BEARER"], key,
-                            always_on_mcps=csv_names(group["ALWAYS_ON_MCPS"], "Always-on aliases"))
+                            always_on_mcps=csv_names(group["ALWAYS_ON_MCPS"], "Always-on aliases"),
+                            allowed_mcps=csv_names(group["ALLOWED_MCPS"], "Allowed MCP aliases"))
+        if not set(identity.always_on_mcps) <= set(identity.allowed_mcps):
+            raise ValueError("Always-on aliases must be included in the allowed MCP aliases")
         add(identity)
         targets.append(identity.name)
     if not targets:

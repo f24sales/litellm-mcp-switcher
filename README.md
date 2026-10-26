@@ -135,7 +135,9 @@ Install the Python package first (`python3 -m pip install .`). Before running `.
 (2) Create new virtual key in LiteLLM
 ```
 
-Choosing **2** creates a dedicated team whose MCP ceiling is `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. The CSV is a setup input; subsequent permission changes are managed in LiteLLM and the Switcher. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
+Choosing **2** creates a dedicated team whose MCP ceiling is `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
+
+The CSV is also the startup removal boundary for this bearer alias. Before accepting connections, the Switcher removes MCP references absent from `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS` through the LiteLLM API, from this key and its dedicated team, and prunes its saved projects. Blank or omitted means no MCP access for that configured bearer. Listed MCPs keep their current grants, active selection and tool restrictions; startup does not grant or enable them automatically. Unconfigured bearers and the global MCP registry are untouched. Configuration is read at process start, so changes require a restart.
 
 Provisioning uses `LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY`. It needs `GET /v1/mcp/server`, `GET /team/info`, `POST /team/new`, `POST /team/update` and `POST /key/generate` permissions. The runtime management key still needs the permissions listed below to manage the newly created team and key.
 

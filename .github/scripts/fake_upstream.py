@@ -5,7 +5,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-permission = {"mcp_servers": ["fixture"], "mcp_tool_permissions": {}, "mcp_access_groups": [], "mcp_toolsets": []}
+permission = {"mcp_servers": ["fixture", "obsolete"], "mcp_tool_permissions": {}, "mcp_access_groups": [], "mcp_toolsets": []}
 key_permission = json.loads(json.dumps(permission))
 
 
@@ -16,7 +16,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         data = {
-            "/v1/mcp/server": [{"server_id": "fixture", "alias": "fixture", "server_name": "CI fixture"}],
+            "/v1/mcp/server": [{"server_id": "fixture", "alias": "fixture", "server_name": "CI fixture"},
+                                {"server_id": "obsolete", "alias": "obsolete", "server_name": "Removed reference"}],
             "/key/info": {"info": {"team_id": "ci-user", "object_permission": key_permission}},
             "/team/info": {"team_info": {"team_id": "ci-user", "object_permission": permission}, "keys": [{}]},
             "/mcp-rest/tools/list": {"tools": [{"name": "read", "description": "Read a fixture"}]},
@@ -44,4 +45,5 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-ThreadingHTTPServer(("127.0.0.1", 4000), Handler).serve_forever()
+if __name__ == "__main__":
+    ThreadingHTTPServer(("127.0.0.1", 4000), Handler).serve_forever()
