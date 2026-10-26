@@ -7,7 +7,7 @@ from mcp_switcher.provision import ProvisionError, Provisioner, main
 def values(suffix=""):
     return {"LITELLM_MCP_SWITCHER_API_BASE_URL": "http://litellm:4000",
             "LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY": "admin-" + "a" * 40,
-            "LITELLM_MCP_SWITCHER_KEY_NAME" + suffix: "alice", "LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER" + suffix: "a" * 64,
+            "LITELLM_MCP_SWITCHER_BEARER_ALIAS" + suffix: "alice", "LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER" + suffix: "a" * 64,
             "LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS" + suffix: "tasks, files"}
 
 
@@ -52,7 +52,7 @@ def test_unknown_ambiguous_or_invalid_catalog_is_rejected(catalog):
 @pytest.mark.parametrize("field,value", [("LITELLM_MCP_SWITCHER_API_BASE_URL", ""),
     ("LITELLM_MCP_SWITCHER_API_BASE_URL", "http://litellm:bad"), ("LITELLM_MCP_SWITCHER_API_BASE_URL", "http://secret@litellm"),
     ("LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY", ""),
-    ("LITELLM_MCP_SWITCHER_KEY_NAME", ""), ("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", ""), ("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "other")])
+    ("LITELLM_MCP_SWITCHER_BEARER_ALIAS", ""), ("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", ""), ("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "other")])
 def test_incomplete_inputs_never_contact_litellm(field, value):
     config = values()
     config[field] = value
@@ -85,7 +85,7 @@ def test_new_team_key_and_ceiling_are_isolated_and_mcp_only():
         assert body["allowed_routes"] == ["mcp_inference_routes", "/key/info"]
         return httpx.Response(200, json={"key": "sk-" + "k" * 40})
     config = values("_02")
-    config.update({"LITELLM_MCP_SWITCHER_KEY_NAME": "someone-else", "LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS": "unrelated"})
+    config.update({"LITELLM_MCP_SWITCHER_BEARER_ALIAS": "someone-else", "LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS": "unrelated"})
     p = provisioner(handler, config, "_02")
     assert p.create() == "sk-" + "k" * 40
     assert team["metadata"]["mcp_switcher_owner"] == "alice"

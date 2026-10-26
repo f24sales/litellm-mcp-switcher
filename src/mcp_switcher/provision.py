@@ -23,7 +23,7 @@ class Provisioner:
             raise ProvisionError("Unsupported configuration field")
         suffix = match[1] or ""
         self.values, self.key = values, key
-        self.name = (values.get("LITELLM_MCP_SWITCHER_KEY_NAME" + suffix) or "").strip()
+        self.name = (values.get("LITELLM_MCP_SWITCHER_BEARER_ALIAS" + suffix) or "").strip()
         csv = values.get("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS" + suffix) or ""
         self.aliases = list(dict.fromkeys(a.strip() for a in csv.split(",") if a.strip()))
         self.always = [a.strip() for a in (values.get("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS" + suffix) or "").split(",") if a.strip()]

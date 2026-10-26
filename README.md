@@ -111,10 +111,10 @@ Run `./config.sh` to use the New/Skip configuration flow and generate Compose/Qu
 Each managed LiteLLM key is one repeat group:
 
 ```dotenv
-#repeat-group: LITELLM_MCP_SWITCHER_KEY suffix02 LITELLM_MCP_SWITCHER_KEY_NAME LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS LITELLM_MCP_SWITCHER_KEY_BEARER LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS
+#repeat-group: LITELLM_MCP_SWITCHER_KEY suffix02 LITELLM_MCP_SWITCHER_BEARER_ALIAS LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS LITELLM_MCP_SWITCHER_KEY_BEARER LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS
 #repeat-optional-complete: LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS
-#repeat-unique: LITELLM_MCP_SWITCHER_KEY_NAME
-LITELLM_MCP_SWITCHER_KEY_NAME=rafael
+#repeat-unique: LITELLM_MCP_SWITCHER_BEARER_ALIAS
+LITELLM_MCP_SWITCHER_BEARER_ALIAS=rafael
 #secret
 LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER=example: openssl rand -hex 32
 LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS=tasks_personal,documents_personal
@@ -202,16 +202,16 @@ Configure managed key groups first. Then add an orchestrator with three fields:
 ```dotenv
 LITELLM_MCP_SWITCHER_ORCHESTRATOR_NAME=orchestrator
 LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER=<separate-openssl-generated-login-token>
-LITELLM_MCP_SWITCHER_ORCHESTRATOR_KEY_NAMES=main,research,coding
+LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER_ALIASES=main,research,coding
 ```
 
-The CSV references `LITELLM_MCP_SWITCHER_KEY_NAME` values, not token strings or upstream MCP aliases. The first name is the default target. Additional orchestrators use `_02`, `_03`, and so on. `config.sh` offers a separate **New/Skip** step for orchestrators and can generate their login tokens with `openssl rand -hex 32`. Skipping the optional group leaves it disabled.
+The CSV references `LITELLM_MCP_SWITCHER_BEARER_ALIAS` values, not token strings or upstream MCP server aliases. A bearer alias is the visible name of a managed LiteLLM virtual key. The first alias is the default target. Additional orchestrators use `_02`, `_03`, and so on. `config.sh` offers a separate **New/Skip** step for orchestrators and can generate their login tokens with `openssl rand -hex 32`. Skipping the optional group leaves it disabled.
 
 Connect the orchestrator client directly to the Switcher's `http://<switcher>:8000/mcp`, or its HTTPS frontend, with its orchestrator bearer. It need not connect through LiteLLM or have an always-on alias of its own. Always-on aliases belong to the managed target keys and still apply when an orchestrator changes their selections.
 
 An orchestrator receives **seven tools**: the six personal tools below, plus `choose_bearer`. This is an explicit role, even when it manages only one key.
 
-1. Call `choose_bearer` without arguments to list permitted names and open a chooser session with the first key selected. Alternatively, supply `key_name` to start with another allowed target.
+1. Call `choose_bearer` without arguments to list permitted bearer aliases and open a chooser session with the first key selected. The MCP argument `key_name` takes this bearer alias; supply it to start with another allowed target.
 2. Keep the returned `session_id`. Pass it to `current_state`, `discover_tools`, `apply_selection`, project tools and `refresh_tools`.
 3. To switch targets, call `choose_bearer(key_name="research", session_id="...")`. Read `current_state` again before applying a selection.
 4. To inspect the current target without changing it, call `choose_bearer(session_id="...")`.
@@ -224,13 +224,13 @@ The injected environment is the source of truth for identities and assignments. 
 
 ### Upgrading an existing installation
 
-Stop the Switcher, install the new package, and rename existing fields once:
+Install the new package and rename existing configuration fields before its next start:
 
 ```sh
 litellm-mcp-switcher-migrate-config /path/to/.env /path/to/config.conf /path/to/container.conf
 ```
 
-Include only files that exist. The helper preserves values, suffixes and comments, rejects conflicting fields, and writes private files without printing credentials. Existing database names/users and custom prefixes stay unchanged. The former default table prefix `mcp_switcher` becomes `litellm_mcp_switcher`; startup migrates those tables in place while retaining projects, owners and operation state. Keep the existing SQLite volume and file mounted. The optional LiteLLM notification adapter's setting is now `LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS`; rename it in LiteLLM's configuration when updating that adapter.
+Include only files that exist. This also renames `LITELLM_MCP_SWITCHER_KEY_NAME` to `LITELLM_MCP_SWITCHER_BEARER_ALIAS` and `LITELLM_MCP_SWITCHER_ORCHESTRATOR_KEY_NAMES` to `LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER_ALIASES`. Alias values, token values, project ownership and MCP selections remain unchanged. The helper preserves values, suffixes and comments, rejects conflicting fields, and writes private files without printing credentials. Existing database names/users and custom prefixes stay unchanged. The former default table prefix `mcp_switcher` becomes `litellm_mcp_switcher`; startup migrates those tables in place while retaining projects, owners and operation state. Keep the existing SQLite volume and file mounted. The optional LiteLLM notification adapter's setting is now `LITELLM_MCP_SWITCHER_AUTO_TOOL_NOTIFICATIONS`; rename it in LiteLLM's configuration when updating that adapter.
 
 ## Using the Web UI and MCP tools
 

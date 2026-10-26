@@ -23,7 +23,7 @@ from mcp_switcher.service import Service
 async def provision_contract(req, master, sid):
     """Exercise the setup helper against LiteLLM, without production credentials."""
     values = {"LITELLM_MCP_SWITCHER_API_BASE_URL": "http://127.0.0.1:4000", "LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY": master,
-              "LITELLM_MCP_SWITCHER_KEY_NAME_02": "setup-contract", "LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER_02": "s" * 64,
+              "LITELLM_MCP_SWITCHER_BEARER_ALIAS_02": "setup-contract", "LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER_02": "s" * 64,
               "LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS_02": "contract"}
     helper = Provisioner(values, "LITELLM_MCP_SWITCHER_KEY_BEARER_02")
     try:

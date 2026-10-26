@@ -105,13 +105,13 @@ def test_configuration_allows_managed_key_without_personal_login(monkeypatch, tm
     monkeypatch.delenv(P + 'KEY_SWITCHER_BEARER')
     monkeypatch.setenv(P + 'ORCHESTRATOR_NAME', 'operator')
     monkeypatch.setenv(P + 'ORCHESTRATOR_BEARER', 'operator-' + 'o' * 40)
-    monkeypatch.setenv(P + 'ORCHESTRATOR_KEY_NAMES', 'alice')
+    monkeypatch.setenv(P + 'ORCHESTRATOR_BEARER_ALIASES', 'alice')
     settings, identities = load_configuration()
     assert identities[1].bearer == ''
     assert identities[2].orchestrator and identities[2].key_names == ('alice',)
     assert authenticate(identities[1].litellm_key, identities) is None
     assert authenticate(identities[2].bearer, identities).name == 'operator'
-    monkeypatch.setenv(P + 'ORCHESTRATOR_KEY_NAMES', 'unknown')
+    monkeypatch.setenv(P + 'ORCHESTRATOR_BEARER_ALIASES', 'unknown')
     with pytest.raises(ValueError):
         load_configuration()
 

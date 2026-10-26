@@ -103,11 +103,14 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
         identities.append(identity)
 
     def groups(kind):
-        suffixes = {m[1] or "" for k in short
-                    if (m := re.fullmatch(kind + r"_(?:NAME|BEARER|SWITCHER_BEARER|ALLOWED_MCPS|ALWAYS_ON_MCPS|KEY_NAMES)(_\d{2,})?", k))}
+        fields = ({"NAME": "BEARER_ALIAS", **{field: "KEY_" + field for field in
+                   ("BEARER", "SWITCHER_BEARER", "ALLOWED_MCPS", "ALWAYS_ON_MCPS")}}
+                  if kind == "KEY" else {"NAME": "ORCHESTRATOR_NAME", "BEARER": "ORCHESTRATOR_BEARER",
+                                         "KEY_NAMES": "ORCHESTRATOR_BEARER_ALIASES"})
+        pattern = "(?:" + "|".join(fields.values()) + r")(_\d{2,})?"
+        suffixes = {m[1] or "" for key in short if (m := re.fullmatch(pattern, key))}
         for suffix in sorted(suffixes, key=lambda s: int(s[1:]) if s else 1):
-            yield {field: short.get(kind + "_" + field + suffix, "").strip()
-                   for field in ("NAME", "BEARER", "SWITCHER_BEARER", "ALLOWED_MCPS", "ALWAYS_ON_MCPS", "KEY_NAMES")}
+            yield {field: short.get(key + suffix, "").strip() for field, key in fields.items()}
 
     targets = []
     for group in groups("KEY"):
@@ -126,9 +129,9 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
     for group in groups("ORCHESTRATOR"):
         if not any(group.values()):
             continue
-        allowed = csv_names(group["KEY_NAMES"], "Orchestrator key names")
+        allowed = csv_names(group["KEY_NAMES"], "Orchestrator bearer aliases")
         if not allowed or not set(allowed) <= set(targets) or len(group["BEARER"]) < 24:
-            raise ValueError("An orchestrator requires a bearer and existing managed key names")
+            raise ValueError("An orchestrator requires a bearer and existing managed bearer aliases")
         add(Identity(group["NAME"], group["BEARER"], key_names=allowed))
     if keys & tokens:
         raise ValueError("Switcher and LiteLLM bearer namespaces must be separate")

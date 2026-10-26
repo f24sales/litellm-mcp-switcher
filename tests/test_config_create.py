@@ -175,3 +175,26 @@ LITELLM_MCP_SWITCHER_ADDITIONAL_LINE=ReadOnly=true
     assert any(line.startswith('PublishPort=') and line.endswith(':28080:8080') for line in unit.splitlines()), unit
     assert ':8000' not in unit
     assert 'ReadOnly=true' in unit
+
+
+def test_bearer_alias_and_key_fields_share_repeat_suffix(tmp_path):
+    prefix = 'LITELLM_MCP_SWITCHER_'
+    alias, bearer = prefix + 'BEARER_ALIAS', prefix + 'KEY_BEARER'
+    example = f'''#repeat-group: LITELLM_MCP_SWITCHER_KEY suffix02 {alias} {bearer}
+#repeat-unique: {alias}
+#required: bearer alias
+{alias}=
+#required: token
+#secret
+#create-with: creator.py
+{bearer}=
+'''
+    setup_files(tmp_path, example, f'{alias}=alice\n{bearer}=existing-bearer\n')
+    status, output = interactive(tmp_path, [(prefix + 'KEY [skip/new]', 'new'),
+        (alias + '_02', 'bob'), ('Choose [1/2]', '2')])
+    assert status == 0, output
+    text = (tmp_path / '.env').read_text()
+    assert f'{alias}=alice\n' in text and f'{bearer}=existing-bearer\n' in text
+    assert f'{alias}_02=bob\n' in text
+    assert f'{bearer}_02=generated-test-bearer\n' in text
+    assert (tmp_path / 'calls').read_text() == f'check {bearer}_02\ncreate {bearer}_02\n'
