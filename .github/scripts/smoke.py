@@ -73,4 +73,19 @@ if mcp:
     status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"],
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "current_state", "arguments": {}}})
     assert status == 200 and 'ci-user' in content and '"isError":true' not in content.replace(' ', '')
+    orchestrator = os.environ["LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER"]
+    status, content = request("http://127.0.0.1:8000/mcp", orchestrator, payload)
+    assert status == 200 and 'choose_bearer' in content and 'admin_set_access' not in content
+    status, content = request("http://127.0.0.1:8000/mcp", orchestrator,
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "choose_bearer", "arguments": {}}})
+    assert status == 200 and '"isError":true' not in content.replace(' ', ''), content
+    if content.startswith('event:'):
+        content = next(line[6:] for line in content.splitlines() if line.startswith('data: '))
+    result = json.loads(content)['result']
+    chosen = result.get('structuredContent') or json.loads(result['content'][0]['text'])
+    assert chosen['target_key'] == 'ci-user'
+    status, content = request("http://127.0.0.1:8000/mcp", orchestrator,
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "current_state", "arguments": {"session_id": chosen['session_id']}}})
+    assert status == 200 and 'ci-user' in content and '"isError":true' not in content.replace(' ', ''), content
 print("Candidate listeners and MCP role separation passed")

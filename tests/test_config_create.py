@@ -172,6 +172,6 @@ LITELLM_MCP_SWITCHER_ADDITIONAL_LINE=ReadOnly=true
     unit = (tmp_path / 'custom-switcher.container').read_text()
     assert 'Image=example.test/switcher:latest' in unit
     assert 'ContainerName=custom-switcher' in unit
-    assert 'PublishPort=28080:8080' in unit
+    assert any(line.startswith('PublishPort=') and line.endswith(':28080:8080') for line in unit.splitlines()), unit
     assert ':8000' not in unit
     assert 'ReadOnly=true' in unit

@@ -24,8 +24,8 @@ def with_orchestrators(setup):
     return Service(original.db, original.upstream, identities, original.settings), fake, identities
 
 
-def call(client, bearer, name, **arguments):
-    status, data = rpc(client, bearer, "tools/call", {"name": name, "arguments": arguments})
+def call(client, bearer, tool_name, **arguments):
+    status, data = rpc(client, bearer, "tools/call", {"name": tool_name, "arguments": arguments})
     assert status == 200, data
     result = data.get("result", {})
     assert not result.get("isError"), result

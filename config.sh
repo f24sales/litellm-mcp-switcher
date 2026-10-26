@@ -1488,6 +1488,13 @@ configure_from_example() {
 
         REPEAT_GROUP_MODES[$group]="$mode"
         REPEAT_GROUP_INDEXES[$group]="$next_index"
+        if [ "$mode" = skip ] && [ "$complete" = false ] && [[ -n "${repeat_optional_group[$group]+x}" ]]; then
+            # Do not reinsert example placeholders for an optional group that was skipped.
+            for field in $fields; do
+                mapped="$(repeat_group_key "$group" "$style" "$field" "$next_index")"
+                externally_owned_keys[$mapped]=1
+            done
+        fi
     }
 
     while IFS= read -r line <&5; do
