@@ -53,9 +53,49 @@ async def provision_contract(req, master, sid):
         else:
             raise AssertionError("Repeated setup must not create a second key")
         assert len((await req("GET", "/team/info?team_id=" + helper.team_id))["keys"]) == 1
+        await rotation_contract(req, master, key, helper.team_id, sid)
     finally:
         helper.client.close()
     print("Setup contract: dedicated team, exact MCP ceiling, callable MCP-only key, repeat protection passed")
+
+
+async def rotation_contract(req, master, key, team_id, sid):
+    """Rotate a runner-only key through the native API, then reopen the persistent journal."""
+    admin = Identity("admin", master, admin=True)
+    user = Identity("rotation-contract", "ci-rotation-" + "s" * 40, key, allowed_mcps=("contract",))
+    with tempfile.TemporaryDirectory() as directory:
+        settings = Settings(litellm_admin_virtual_key=SecretStr(master),
+                            litellm_api_base_url="http://127.0.0.1:4000",
+                            rotation_credentials_file=str(Path(directory) / "rotation-credentials.json"))
+        db = Database("sqlite:///" + str(Path(directory) / "switcher.sqlite3"), "rotation")
+        db.migrate()
+        db.initialize_owners([user.name])
+        upstream = LiteLLM(settings)
+        service = Service(db, upstream, [admin, user], settings)
+        try:
+            preview = await service.rotation.execute(admin, user.name, "preview")
+            args = (admin, user.name, "rotate", preview["revision"], preview["operation_id"])
+            result = await service.rotation.execute(*args)
+            assert result["status"] == "verified", result
+            assert await service.rotation.execute(*args) == result
+            assert await upstream.inspect_key(key) is None
+            restored = service.rotation.store.overlay([admin, user])
+            restarted = Service(db, upstream, restored, settings)
+            await restarted.rotation.recover()
+            await prune_configured_access(restarted)
+            info, team, ceiling, active = await upstream.scope(restarted.users[user.name], await upstream.inventory())
+            assert info["team_id"] == team["team_id"] == team_id
+            assert ceiling.servers == active.servers == {sid: None}
+            assert len((await req("GET", "/team/info?team_id=" + team_id))["keys"]) == 1
+            new_key = restarted.users[user.name].litellm_key
+            tools = await req("GET", "/mcp-rest/tools/list?server_id=" + sid, key=new_key)
+            assert {tool["name"] for tool in tools["tools"]} == {"read", "write"}
+            await req("POST", "/v1/chat/completions", {"model": "none", "messages": []}, key=new_key, expected=403)
+            assert key not in json.dumps(result) and new_key not in json.dumps(result)
+        finally:
+            await upstream.close()
+            db.close()
+    print("Rotation contract: native regeneration, old-key revocation, unchanged grants, idempotent retry, durable recovery passed")
 
 
 async def always_on_contract(req, master, key, optional_id):

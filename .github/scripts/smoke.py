@@ -70,14 +70,22 @@ if mcp:
     assert request("http://127.0.0.1:8000/mcp", "unknown", payload)[0] == 401
     status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"], payload)
     assert status == 200 and 'current_state' in content and 'admin_set_access' not in content
+    assert 'rotate_bearer' not in content
     status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY"], payload)
     assert status == 200 and 'admin_set_access' in content and 'apply_selection' not in content
+    assert 'rotate_bearer' in content
     status, content = request("http://127.0.0.1:8000/mcp", os.environ["LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER"],
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "current_state", "arguments": {}}})
     assert status == 200 and 'ci-user' in content and '"isError":true' not in content.replace(' ', '')
     orchestrator = os.environ["LITELLM_MCP_SWITCHER_ORCHESTRATOR_BEARER"]
     status, content = request("http://127.0.0.1:8000/mcp", orchestrator, payload)
     assert status == 200 and 'choose_bearer' in content and 'admin_set_access' not in content
+    assert 'rotate_bearer' in content
+    status, content = request("http://127.0.0.1:8000/mcp", orchestrator,
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+            "name": "rotate_bearer", "arguments": {"key_name": "ci-user", "action": "preview"}}})
+    assert status == 200 and '"isError":true' not in content.replace(' ', ''), content
+    assert 'operation_id' in content and 'revision' in content
     status, content = request("http://127.0.0.1:8000/mcp", orchestrator,
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "choose_bearer", "arguments": {}}})
     assert status == 200 and '"isError":true' not in content.replace(' ', ''), content
