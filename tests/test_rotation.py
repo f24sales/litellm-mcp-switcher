@@ -22,19 +22,30 @@ from test_web_mcp import rpc
 def rotating_api(service, fake, *, timeout=False, reject=False, unavailable=False):
     original = fake.response
     writes = []
+    for info in fake.keys.values():
+        info["budget_id"] = None
+        info.setdefault("key_alias", "fixture-" + info["team_id"])
+        info.setdefault("rpm_limit", 17)
 
     def response(request):
-        if request.url.path == "/key/regenerate":
+        if request.url.path == "/key/generate":
             data = json.loads(request.content)
             writes.append(data)
-            assert set(data) == {"key", "new_key", "grace_period"}
-            assert data["grace_period"] == "0s"
             if reject:
                 return httpx.Response(403, json={"secret": "never return this"})
-            fake.keys[data["new_key"]] = fake.keys.pop(data["key"])
+            source = next(info for info in fake.keys.values() if info["team_id"] == data["team_id"])
+            fake.keys[data["key"]] = {**copy.deepcopy(source), "key_alias": None}
             if timeout:
                 raise httpx.ReadTimeout("upstream-secret", request=request)
-            return httpx.Response(200, json={"key": data["new_key"]})
+            return httpx.Response(200, json={"key": data["key"]})
+        if request.url.path == "/key/delete":
+            for key in json.loads(request.content)["keys"]:
+                fake.keys.pop(key, None)
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/key/update" and "key_alias" in json.loads(request.content):
+            data = json.loads(request.content)
+            fake.keys[data["key"]]["key_alias"] = data["key_alias"]
+            return httpx.Response(200, json={"ok": True})
         if unavailable and writes and request.url.path == "/key/info":
             return httpx.Response(503)
         return original(request)
@@ -99,7 +110,34 @@ async def test_rejected_write_retries_same_candidate_and_blocks_other_operation(
         await service.rotation.execute(users[0], "alice", "rotate", preview["revision"], str(uuid.uuid4()))
     resumed = rotating_api(service, fake)
     assert (await service.rotation.execute(*args))["status"] == "verified"
-    assert writes[0]["new_key"] == resumed[0]["new_key"]
+    assert writes[0]["key"] == resumed[0]["key"]
+
+
+@pytest.mark.parametrize("lost_path", ["/key/delete", "/key/update"])
+async def test_revocation_or_alias_response_loss_resumes_without_recreating_key(setup, lost_path):
+    service, fake, users = setup
+    writes = rotating_api(service, fake)
+    transport = service.upstream.client._transport
+    failed = False
+
+    async def response(request):
+        nonlocal failed
+        result = await transport.handle_async_request(request)
+        if request.url.path == lost_path and not failed:
+            failed = True
+            raise httpx.ReadTimeout("lost write response", request=request)
+        return result
+
+    service.upstream.client._transport = httpx.MockTransport(response)
+    preview = await service.rotation.execute(users[0], "alice", "preview")
+    result = await service.rotation.execute(users[0], "alice", "rotate", preview["revision"], preview["operation_id"])
+    assert result["status"] == "uncertain" and failed
+    restarted = Service(service.db, service.upstream, service.rotation.store.overlay(users), service.settings)
+    await restarted.rotation.recover()
+    status = await restarted.rotation.execute(users[0], "alice", "status", operation_id=preview["operation_id"])
+    assert status["status"] == "verified" and len(writes) == 1
+    assert users[1].litellm_key not in fake.keys
+    assert fake.keys[restarted.users["alice"].litellm_key]["key_alias"] == "fixture-alice"
 
 
 async def test_stale_preview_and_unauthorized_calls_do_not_rotate(setup):
@@ -110,9 +148,20 @@ async def test_stale_preview_and_unauthorized_calls_do_not_rotate(setup):
     with pytest.raises(Problem, match="cannot manage"):
         await service.rotation.execute(users[-1], "bob", "preview")
     preview = await service.rotation.execute(users[-1], "alice", "preview")
-    fake.keys[users[1].litellm_key]["models"] = ["changed"]
+    fake.keys[users[1].litellm_key]["rpm_limit"] = 23
     with pytest.raises(Problem, match="fresh rotation preview"):
         await service.rotation.execute(users[-1], "alice", "rotate", preview["revision"], preview["operation_id"])
+    assert not writes
+
+
+@pytest.mark.parametrize("field,value", [("models", ["some-llm"]), ("spend", 1), ("expires", "2030-01-01"),
+                                         ("budget_id", "shared-budget"), ("budget_duration", "1d")])
+async def test_accounting_and_expiring_keys_are_rejected_before_writing(setup, field, value):
+    service, fake, users = setup
+    writes = rotating_api(service, fake)
+    fake.keys[users[1].litellm_key][field] = value
+    with pytest.raises(Problem, match="MCP-only"):
+        await service.rotation.execute(users[0], "alice", "preview")
     assert not writes
 
 

@@ -60,7 +60,7 @@ async def provision_contract(req, master, sid):
 
 
 async def rotation_contract(req, master, key, team_id, sid):
-    """Rotate a runner-only key through the native API, then reopen the persistent journal."""
+    """Replace a runner-only key through community APIs, then reopen the persistent journal."""
     admin = Identity("admin", master, admin=True)
     user = Identity("rotation-contract", "ci-rotation-" + "s" * 40, key, allowed_mcps=("contract",))
     with tempfile.TemporaryDirectory() as directory:
@@ -95,7 +95,7 @@ async def rotation_contract(req, master, key, team_id, sid):
         finally:
             await upstream.close()
             db.close()
-    print("Rotation contract: native regeneration, old-key revocation, unchanged grants, idempotent retry, durable recovery passed")
+    print("Rotation contract: community replacement, old-key revocation, unchanged grants, idempotent retry, durable recovery passed")
 
 
 async def always_on_contract(req, master, key, optional_id):

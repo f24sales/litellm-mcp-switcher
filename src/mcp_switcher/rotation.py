@@ -1,4 +1,4 @@
-"""Native key rotation with a private, crash-recoverable credentials journal."""
+"""MCP-only key replacement with a private, crash-recoverable credentials journal."""
 import fcntl
 import hashlib
 import json
@@ -79,14 +79,40 @@ class CredentialStore:
 
 
 # Compare authority and configured limits, not counters/timestamps changed by use.
-GRANT_FIELDS = ("team_id", "user_id", "organization_id", "key_alias", "models", "aliases",
+GRANT_FIELDS = ("team_id", "user_id", "organization_id", "project_id", "agent_id", "models", "aliases",
                 "allowed_routes", "permissions", "object_permission", "metadata", "budget_id",
                 "max_budget", "soft_budget", "budget_duration", "model_max_budget", "model_rpm_limit",
-                "model_tpm_limit", "tpm_limit", "rpm_limit", "max_parallel_requests", "expires", "blocked")
+                "model_tpm_limit", "tpm_limit", "rpm_limit", "max_parallel_requests", "blocked",
+                "tpd_limit", "config", "allowed_cache_controls", "guardrails", "policies", "prompts",
+                "mcp_rpm_limit", "tag_rpm_limit", "allowed_passthrough_routes", "denied_passthrough_routes",
+                "allowed_vector_store_indexes", "rpm_limit_type", "tpm_limit_type", "router_settings",
+                "access_group_ids", "enforced_params", "end_user_budget_id")
+
+
+def permission(value):
+    return {k: v for k, v in (value or {}).items() if k != "object_permission_id"}
 
 
 def grants(info):
-    return digest({field: info.get(field) for field in GRANT_FIELDS})
+    fields = {field: info.get(field) for field in GRANT_FIELDS}
+    fields["object_permission"] = permission(info.get("object_permission"))
+    return digest(fields)
+
+
+def replacement_parameters(info):
+    # Replacing a key creates a new accounting identity. Refuse keys whose expiry or
+    # budget/spend history cannot be preserved through the community management API.
+    unsupported = ("expires", "budget_id", "end_user_budget_id", "max_budget", "soft_budget", "budget_duration",
+                   "budget_limits", "model_max_budget", "budget_fallbacks", "spend", "auto_rotate",
+                   "rotation_interval", "temp_budget_increase", "temp_budget_expiry", "blocked")
+    if info.get("models") != ["no-default-models"] or any(info.get(k) not in (None, 0, {}, []) for k in unsupported):
+        raise Problem(409, "Replacement rotation supports unexpired MCP-only keys without spend, budgets or "
+                      "automatic rotation; this key requires separate operator handling")
+    data = {field: info[field] for field in GRANT_FIELDS if field in info}
+    data["object_permission"] = permission(info.get("object_permission"))
+    # LiteLLM requires unique aliases. Restore the original after revoking its old owner.
+    data.update(key_alias=None, spend=0, send_invite_email=False)
+    return data
 
 
 def public(operation_id, operation):
@@ -110,8 +136,9 @@ class Rotation:
     async def preview(self, target):
         inventory = await self.service.upstream.inventory()
         info, _, _, _ = await self.service.upstream.scope(target, inventory)
-        return {"target_key": target.name, "revision": digest([target.name, target.litellm_key, grants(info)]),
-                "operation_id": str(uuid.uuid4()), "old_key_revoked_immediately": True,
+        replacement_parameters(info)
+        return {"target_key": target.name, "revision": digest([target.name, target.litellm_key, grants(info), info.get("key_alias")]),
+                "operation_id": str(uuid.uuid4()), "old_key_revoked_after_replacement_verified": True,
                 "external_update_required": True,
                 "message": "Rotate only on explicit request. Afterwards update external consumers (including "
                            "Citadel email mappings) and run their normal scan manually. No scan is triggered."}, info
@@ -128,27 +155,46 @@ class Rotation:
                 self.service.users[alias] = replace(self.service.users[alias], litellm_key=record["key"])
 
     async def reconcile(self, data, operation):
-        """Probe both credentials; never repeat a remote write during startup recovery."""
+        """Finish a journaled replacement; never create another key during startup recovery."""
         upstream = self.service.upstream
         new = await upstream.inspect_key(operation["new_key"])
+        old = await upstream.inspect_key(operation["old_key"])
         if new is not None:
-            self.activate(data, operation)
-            if grants(new) != operation["grants"]:
-                operation.update(status="conflict", message="Rotated key is valid but its grants changed; "
-                                 "review LiteLLM and update external consumers manually")
-            elif await upstream.inspect_key(operation["old_key"]) is not None:
-                operation.update(status="uncertain", message="New key is valid; old-key revocation is not "
-                                 "confirmed yet. Retry this operation; do not start another rotation")
+            if (grants(new) != operation["grants"] or (old is not None and
+                    (grants(old) != operation["grants"] or old.get("key_alias") != operation["key_alias"]))):
+                if old is not None:
+                    await upstream.delete_key(operation["new_key"])
+                    if await upstream.inspect_key(operation["new_key"]) is not None:
+                        raise Problem(502, "Candidate cleanup is not confirmed")
+                    operation.update(status="conflict", message="Grants changed; candidate removed and old key "
+                                     "retained. Obtain a fresh preview after reviewing the key")
+                else:
+                    self.activate(data, operation)
+                    operation.update(status="conflict", message="Replacement grants changed after revocation; "
+                                     "review LiteLLM and update external consumers privately")
             else:
+                if old is not None:
+                    await upstream.delete_key(operation["old_key"])
+                    if await upstream.inspect_key(operation["old_key"]) is not None:
+                        raise Problem(502, "Old-key revocation is not confirmed")
+                # The candidate is now the sole key; retain it even if alias restoration fails.
+                self.activate(data, operation)
+                self.store.write(data)
+                self.refresh(data)
+                if new.get("key_alias") != operation["key_alias"]:
+                    await upstream.restore_key_alias(operation["new_key"], operation["key_alias"])
+                    new = await upstream.inspect_key(operation["new_key"])
+                    if new is None or new.get("key_alias") != operation["key_alias"] or grants(new) != operation["grants"]:
+                        raise Problem(502, "Replacement alias restoration is not confirmed")
                 operation.update(status="verified", message="New key persisted and verified; old key revoked. "
                                  "Update external consumers and run the Citadel scan manually")
                 operation.pop("old_key")
                 operation.pop("new_key")
+                operation.pop("parameters")
         else:
-            old = await upstream.inspect_key(operation["old_key"])
             if old is None:
                 raise Problem(502, "Neither rotation credential could be verified; reconcile LiteLLM privately")
-            if grants(old) != operation["grants"]:
+            if grants(old) != operation["grants"] or old.get("key_alias") != operation["key_alias"]:
                 operation.update(status="conflict", message="Key grants changed during rotation; review "
                                  "LiteLLM before retrying")
             else:
@@ -200,13 +246,14 @@ class Rotation:
                     if operation["status"] != "retryable":
                         return public(operation_id, operation)
                 else:
-                    if any(op["alias"] == target.name and op["status"] != "verified"
+                    if any(op["alias"] == target.name and op["status"] in {"pending", "retryable", "uncertain"}
                            for op in data["operations"].values()):
                         raise Problem(409, "Resolve the existing rotation operation before starting another")
                     preview, info = await self.preview(target)
                     if not revision or preview["revision"] != revision:
                         raise Problem(409, "Key or grants changed; obtain a fresh rotation preview")
                     operation = {"alias": target.name, "revision": revision, "grants": grants(info),
+                                 "key_alias": info.get("key_alias"), "parameters": replacement_parameters(info),
                                  "old_key": target.litellm_key, "new_key": "sk-" + secrets.token_hex(32),
                                  "status": "pending", "message": "Rotation journal saved; result pending"}
                     data["operations"][operation_id] = operation
@@ -214,7 +261,7 @@ class Rotation:
                 operation.update(status="pending", message="Rotation journal saved; result pending")
                 self.store.write(data)
                 try:
-                    await self.service.upstream.regenerate_key(operation["old_key"], operation["new_key"])
+                    await self.service.upstream.create_replacement_key(operation["new_key"], operation["parameters"])
                 except Problem:
                     operation.update(status="uncertain", message="LiteLLM write result is uncertain; retry "
                                      "this operation_id and revision")

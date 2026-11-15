@@ -101,10 +101,14 @@ class LiteLLM:
         await self.request("POST", "/team/update", json={"team_id": team["team_id"],
             "object_permission": merge_permission(team.get("object_permission") or {}, selection)})
 
-    async def regenerate_key(self, old_key, new_key):
-        # Do not send any grants or reset limits. Explicit zero overrides global grace-period defaults.
-        await self.request("POST", "/key/regenerate", json={"key": old_key, "new_key": new_key,
-                                                            "grace_period": "0s"})
+    async def create_replacement_key(self, new_key, parameters):
+        await self.request("POST", "/key/generate", json={**parameters, "key": new_key})
+
+    async def delete_key(self, key):
+        await self.request("POST", "/key/delete", json={"keys": [key]})
+
+    async def restore_key_alias(self, key, alias):
+        await self.request("POST", "/key/update", json={"key": key, "key_alias": alias})
 
     async def inspect_key(self, key):
         try:

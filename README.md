@@ -177,7 +177,7 @@ The dedicated administrative key needs:
 - `/v1/mcp/server`
 - `/mcp-rest/tools/list`
 
-Bearer rotation additionally requires `/key/regenerate`. Grant this route to the dedicated management
+Bearer rotation additionally requires `/key/generate` and `/key/delete`. Grant these routes to the dedicated management
 virtual key; never configure the LiteLLM master key in the Switcher.
 
 Grant MCP discovery for the managed registry to this identity through LiteLLM's permission model. Do not grant LLM inference routes. The assigned user key needs MCP inference routes and `/key/info`; key inspection authenticates through the Authorization header, never a key in the URL.
@@ -274,7 +274,7 @@ logins cannot list or call it. It always requires an explicit `key_name`, indepe
 
 1. Call with `action="preview"` to inspect the operation without changing anything.
 2. Only on an explicit rotation request, call `action="rotate"` with the returned `revision` and
-   `operation_id`. The old LiteLLM bearer is revoked immediately. Grants, limits, teams, projects and
+   `operation_id`. The old LiteLLM bearer is revoked after its replacement is verified. MCP grants, rate limits, teams, projects and
    Switcher login credentials are preserved.
 3. Read the saved outcome with `action="status"` and the same `operation_id`. If a request times out
    or returns `retryable`/`uncertain`, retry `rotate` with **the same ID and revision**. A completed retry
@@ -282,9 +282,14 @@ logins cannot list or call it. It always requires an explicit `key_name`, indepe
 4. Update external consumers privately on the host. For Citadel, replace the backend bearer in the
    email mapping, then run the normal manual Cloudflare API scan. The tool performs neither operation.
 
-The native `/key/regenerate` request sends only the old key, one cryptographically random replacement
-and `grace_period="0s"`. It never sends permissions or budget updates. The candidate is persisted before
-the request, allowing startup to reconcile a lost response without generating a second key.
+The community-compatible implementation uses `/key/generate`, `/key/delete`, and `/key/update`.
+It creates one cryptographically random candidate with the existing MCP grants and rate limits, checks
+the result, revokes the old key and restores its unique LiteLLM alias. A short overlap is possible until
+the old key is deleted. `/key/regenerate` is Enterprise-only and is not used. Rotation supports
+unexpired MCP-only keys with no spend, budgets or automatic rotation; preview rejects other keys
+because replacing their accounting identity could reset history or limits. The candidate is persisted
+before the request. Startup can finish a journaled revocation/alias restoration after a lost response
+without creating another key. The LiteLLM key row changes; historical key IDs are not migrated.
 
 `LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE` defaults to
 `/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json`. This separate, atomic mode-0600

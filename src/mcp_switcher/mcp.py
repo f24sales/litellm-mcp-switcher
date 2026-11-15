@@ -68,8 +68,9 @@ def create_mcp(service, identities):
               "requested. Admins and assigned orchestrators only. Always specify key_name. action=preview "
               "is read-only and returns revision and operation_id; pass both to action=rotate. Reuse both "
               "for retries. action=status reads the operation journal. Rotation revokes the old LiteLLM key "
-              "immediately and persists its replacement across Switcher restarts, preserving grants and "
-              "limits. Switcher login tokens stay unchanged. Tokens are never returned. External consumers "
+              "after creating and verifying a replacement, preserving MCP grants and rate limits. This "
+              "supports unexpired MCP-only keys without spend or budgets; other keys are refused. The "
+              "replacement persists across restarts. Switcher logins stay unchanged. Tokens are never returned. External consumers "
               "such as Citadel email mappings must be updated privately on the host, followed by their "
               "normal manual scan. This tool does not update Citadel or trigger a scan.")
     async def rotate_bearer(key_name: str, action: Literal["preview", "rotate", "status"] = "preview",
