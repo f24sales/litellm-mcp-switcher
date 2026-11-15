@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     webui_enabled: bool = True
     mcp_enabled: bool = True
     webui_refresh_seconds: int = Field(default=30, ge=5, le=3600)
+    rotation_credentials_file: str = "/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json"
     mcp_switcher_db_backend: str = "sqlite"
     mcp_switcher_db_host: str = "host.containers.internal"
     mcp_switcher_db_port: int = 5432
@@ -139,6 +140,11 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
         add(Identity(group["NAME"], group["BEARER"], key_names=allowed))
     if keys & tokens:
         raise ValueError("Switcher and LiteLLM bearer namespaces must be separate")
+    from .rotation import CredentialStore
+    identities = CredentialStore(settings.rotation_credentials_file).overlay(identities)
+    effective_keys = [u.litellm_key for u in identities if u.litellm_key]
+    if len(set(effective_keys)) != len(effective_keys) or set(effective_keys) & tokens:
+        raise ValueError("Rotated keys must remain unique and separate from Switcher logins")
     return settings, identities
 
 

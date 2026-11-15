@@ -5,6 +5,7 @@ from mcp_switcher.config import authenticate, load_configuration
 
 def configure(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE", str(tmp_path / "rotation.json"))
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY", "admin-" + "a" * 40)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_BEARER_ALIAS", "alice")
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER", "switcher-" + "s" * 40)

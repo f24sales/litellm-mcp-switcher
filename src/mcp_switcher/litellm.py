@@ -101,6 +101,26 @@ class LiteLLM:
         await self.request("POST", "/team/update", json={"team_id": team["team_id"],
             "object_permission": merge_permission(team.get("object_permission") or {}, selection)})
 
+    async def regenerate_key(self, old_key, new_key):
+        # Do not send any grants or reset limits. Explicit zero overrides global grace-period defaults.
+        await self.request("POST", "/key/regenerate", json={"key": old_key, "new_key": new_key,
+                                                            "grace_period": "0s"})
+
+    async def inspect_key(self, key):
+        try:
+            response = await self.client.get("/key/info", headers={"Authorization": "Bearer " + key})
+            if response.status_code in {401, 403}:
+                return None
+            if response.status_code != 200:
+                raise Problem(502, "LiteLLM key verification is unavailable")
+            data = response.json()
+            info = data.get("info") if isinstance(data, dict) else None
+            if not isinstance(info, dict):
+                raise ValueError
+            return info
+        except (httpx.HTTPError, ValueError):
+            raise Problem(502, "LiteLLM key verification is unavailable") from None
+
     async def refresh_tools(self, identity):
         data = await self.request("POST", "/mcp/notify-tools-changed", token=identity.litellm_key, json={})
         if (data.get("notification") != "notifications/tools/list_changed"

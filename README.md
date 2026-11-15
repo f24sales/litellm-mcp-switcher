@@ -177,6 +177,9 @@ The dedicated administrative key needs:
 - `/v1/mcp/server`
 - `/mcp-rest/tools/list`
 
+Bearer rotation additionally requires `/key/regenerate`. Grant this route to the dedicated management
+virtual key; never configure the LiteLLM master key in the Switcher.
+
 Grant MCP discovery for the managed registry to this identity through LiteLLM's permission model. Do not grant LLM inference routes. The assigned user key needs MCP inference routes and `/key/info`; key inspection authenticates through the Authorization header, never a key in the URL.
 
 The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` marker represents complete opt-out because an empty upstream list can inherit team access. The Switcher handles this distinction when applying an empty selection.
@@ -185,7 +188,7 @@ The supported reference deployment is LiteLLM `v1.106.2`. Its `no-mcp-servers` m
 
 `LITELLM_MCP_SWITCHER_DB_BACKEND` selects `sqlite`, `postgres`, or `mariadb` through SQLAlchemy. Alembic runs migrations before listeners start. Network database table prefixes are validated.
 
-With SQLite, `config.sh` omits/blanks network database fields and generates the persistent mount using the existing `*_DB_BACKEND` named-volume convention. The fixed application directory is `/opt/f24sales/litellm-mcp-switcher/sqlite`. No JSON state file or separately configured SQLite path is required. The explicit deployment Quadlet provides an equivalent volume; do not install generated and explicit Quadlets with the same container name.
+With SQLite, `config.sh` omits/blanks network database fields and generates the persistent mount using the existing `*_DB_BACKEND` named-volume convention. The fixed application directory is `/opt/f24sales/litellm-mcp-switcher/sqlite`. No separately configured SQLite path is required. The explicit deployment Quadlet provides an equivalent volume; do not install generated and explicit Quadlets with the same container name.
 
 The database holds owned projects, their selections and versions, and operation records for verification/recovery. Back it up using normal procedures for the selected backend.
 
@@ -263,6 +266,37 @@ Administrative login provides a user selector for editing ceilings. Normal users
 | `admin_set_access` | Replace the user's ceiling and cap active access accordingly |
 
 Tool listings and calls enforce roles, including calls using cached tool names. Read-only tools carry `readOnlyHint: true`. Tools that change selections/projects or send refresh notifications explicitly instruct agents to act **only on the user's request for that specific action**. Research, discovery, or an upstream error does not authorize unsolicited changes. These descriptions guide agents; authentication, ownership, ceilings, and always-on protection are enforced by the backend.
+
+### Rotating a managed LiteLLM bearer
+
+`rotate_bearer` is available to administrators and orchestrators for their assigned aliases. Personal
+logins cannot list or call it. It always requires an explicit `key_name`, independent of chooser sessions:
+
+1. Call with `action="preview"` to inspect the operation without changing anything.
+2. Only on an explicit rotation request, call `action="rotate"` with the returned `revision` and
+   `operation_id`. The old LiteLLM bearer is revoked immediately. Grants, limits, teams, projects and
+   Switcher login credentials are preserved.
+3. Read the saved outcome with `action="status"` and the same `operation_id`. If a request times out
+   or returns `retryable`/`uncertain`, retry `rotate` with **the same ID and revision**. A completed retry
+   does not rotate again. `conflict` requires private operator review of LiteLLM and the journal.
+4. Update external consumers privately on the host. For Citadel, replace the backend bearer in the
+   email mapping, then run the normal manual Cloudflare API scan. The tool performs neither operation.
+
+The native `/key/regenerate` request sends only the old key, one cryptographically random replacement
+and `grace_period="0s"`. It never sends permissions or budget updates. The candidate is persisted before
+the request, allowing startup to reconcile a lost response without generating a second key.
+
+`LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE` defaults to
+`/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json`. This separate, atomic mode-0600
+file contains secrets; keep it on a persistent private mount and include it in private backups.
+This mount is required for rotation **also with PostgreSQL or MariaDB**. The project database still
+contains no bearer tokens. Tool responses never return tokens; operators can retrieve the current
+key privately from `keys.<alias>.key` in this file when updating consumers.
+
+On startup, the journal overrides configured keys from the same rotation history. An unrelated key
+in the environment fails validation and requires private reconciliation. Do not delete the journal
+while environment files still contain revoked keys. Run one Switcher process per installation;
+permission writes and rotations serialize per alias, and a file lock excludes concurrent rotations.
 
 ## Changing access and reloading client tools
 

@@ -44,7 +44,9 @@ class FakeAPI:
                                            "notified_connections": 2, "permissions_changed": False,
                                            "client_refresh_required": True})
         if path == "/key/info":
-            return httpx.Response(200, json={"info": self.keys[request.headers["Authorization"].removeprefix("Bearer ")]})
+            key = request.headers["Authorization"].removeprefix("Bearer ")
+            return (httpx.Response(200, json={"info": self.keys[key]}) if key in self.keys
+                    else httpx.Response(401, json={}))
         if path == "/team/info":
             name = request.url.params["team_id"]
             return httpx.Response(200, json={"team_info": self.teams[name], "keys": [{"token": "redacted"}]})
@@ -87,8 +89,9 @@ def users():
 
 
 @pytest.fixture
-def setup(db, users):
+def setup(db, users, tmp_path):
     fake = FakeAPI()
-    settings = Settings(litellm_admin_virtual_key=SecretStr(users[0].bearer))
+    settings = Settings(litellm_admin_virtual_key=SecretStr(users[0].bearer),
+                        rotation_credentials_file=str(tmp_path / "rotation-credentials.json"))
     upstream = LiteLLM(settings, transport=httpx.MockTransport(fake.response))
     return Service(db, upstream, users, settings), fake, users

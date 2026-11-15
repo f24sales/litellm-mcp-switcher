@@ -1,4 +1,6 @@
 """Curated MCP management tools with per-call identity and role checks."""
+from typing import Literal
+
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier, require_scopes
@@ -56,6 +58,27 @@ def create_mcp(service, identities):
             raise ToolError("Unknown chooser session; call choose_bearer to open a new session") from None
         except Problem as exc:
             raise ToolError(exc.message) from None
+
+    def rotation_access(context):
+        return context.token is not None and bool({"admin", "orchestrator"} & set(context.token.scopes))
+
+    @mcp.tool(auth=rotation_access,
+              annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+              description=CHANGE_POLICY + "\n\nRotate a configured LiteLLM bearer alias only when explicitly "
+              "requested. Admins and assigned orchestrators only. Always specify key_name. action=preview "
+              "is read-only and returns revision and operation_id; pass both to action=rotate. Reuse both "
+              "for retries. action=status reads the operation journal. Rotation revokes the old LiteLLM key "
+              "immediately and persists its replacement across Switcher restarts, preserving grants and "
+              "limits. Switcher login tokens stay unchanged. Tokens are never returned. External consumers "
+              "such as Citadel email mappings must be updated privately on the host, followed by their "
+              "normal manual scan. This tool does not update Citadel or trigger a scan.")
+    async def rotate_bearer(key_name: str, action: Literal["preview", "rotate", "status"] = "preview",
+                            revision: str | None = None, operation_id: str | None = None) -> dict:
+        token = get_access_token()
+        user = authenticate(token.token if token else "", identities)
+        if user is None:
+            raise ToolError("Authentication required")
+        return await run(service.rotation.execute(user, key_name, action, revision, operation_id))
 
     @mcp.tool(auth=require_scopes("orchestrator"),
               annotations={"readOnlyHint": False, "destructiveHint": False},

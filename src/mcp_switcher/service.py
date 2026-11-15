@@ -3,9 +3,11 @@ import asyncio
 import hashlib
 import json
 import time
+from dataclasses import replace
 
 from .models import Problem
 from .litellm import intersect
+from .rotation import Rotation
 
 
 def revision(ceiling, active, raw=None, always_on=(), target_key=""):
@@ -20,6 +22,8 @@ class Service:
         self.users = {u.name: u for u in users if u.litellm_key and not u.admin}
         self.discovery_limit = asyncio.Semaphore(3)
         self.discovery = {}
+        self.key_locks = {name: asyncio.Lock() for name in self.users}
+        self.rotation = Rotation(self)
 
     def target(self, actor, name=None):
         if actor.admin:
@@ -33,7 +37,9 @@ class Service:
             return self.users[name]
         if name is not None and name != actor.name:
             raise Problem(403, "This identity cannot manage another user")
-        return actor
+        if actor.name not in self.users:
+            raise Problem(403, "This identity has no configured managed key")
+        return replace(actor, litellm_key=self.users[actor.name].litellm_key)
 
     async def snapshot(self, actor, name=None):
         target = self.target(actor, name)
@@ -146,6 +152,11 @@ class Service:
         return {"deleted": True, "target_key": target.name}
 
     async def apply(self, actor, data, name=None, ceiling_change=False):
+        target = self.target(actor, name)
+        async with self.key_locks[target.name]:
+            return await self._apply(actor, data, name, ceiling_change)
+
+    async def _apply(self, actor, data, name=None, ceiling_change=False):
         if ceiling_change and not actor.admin:
             raise Problem(403, "Administrative access required")
         target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)

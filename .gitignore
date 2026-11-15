@@ -11,6 +11,7 @@ dist/
 .ruff_cache/
 *.db
 *.sqlite*
+rotation-credentials.json*
 
 docker-compose.yml
 /litellm-mcp-switcher.container

@@ -12,3 +12,6 @@ LITELLM_MCP_SWITCHER_WEBUI_ENABLED=1
 LITELLM_MCP_SWITCHER_MCP_ENABLED=1
 
 LITELLM_MCP_SWITCHER_WEBUI_REFRESH_SECONDS=30
+
+# Private durable credentials journal; preserve this mount even with PostgreSQL/MariaDB.
+LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE=/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json

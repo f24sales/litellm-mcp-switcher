@@ -31,6 +31,7 @@ async def serve():
     upstream = LiteLLM(settings)
     service = Service(db, upstream, users, settings)
     try:
+        await service.rotation.recover()
         await prune_configured_access(service)
     except BaseException:
         await upstream.close()

@@ -38,7 +38,7 @@ def test_orchestrator_two_sessions_projects_and_key_scoped_writes(setup):
     mcp = create_mcp(service, identities)
     with TestClient(mcp.http_app(path="/mcp", stateless_http=True, json_response=True)) as client:
         bearer = identities[-2].bearer
-        for who, count in [(identities[1], 6), (identities[-2], 7), (identities[-1], 7)]:
+        for who, count in [(identities[1], 6), (identities[-2], 8), (identities[-1], 8)]:
             _, data = rpc(client, who.bearer, "tools/list")
             names = {t['name'] for t in data['result']['tools']}
             assert len(names) == count
