@@ -108,7 +108,7 @@ def replacement_parameters(info):
     if info.get("models") != ["no-default-models"] or any(info.get(k) not in (None, 0, {}, []) for k in unsupported):
         raise Problem(409, "Replacement rotation supports unexpired MCP-only keys without spend, budgets or "
                       "automatic rotation; this key requires separate operator handling")
-    data = {field: info[field] for field in GRANT_FIELDS if field in info}
+    data = {field: info[field] for field in GRANT_FIELDS if info.get(field) not in (None, {}, [])}
     data["object_permission"] = permission(info.get("object_permission"))
     # LiteLLM requires unique aliases. Restore the original after revoking its old owner.
     data.update(key_alias=None, spend=0, send_invite_email=False)

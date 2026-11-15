@@ -18,6 +18,7 @@ from mcp_switcher.db import Database
 from mcp_switcher.litellm import LiteLLM
 from mcp_switcher.mcp import create_mcp
 from mcp_switcher.provision import ProvisionError, Provisioner
+from mcp_switcher.rotation import GRANT_FIELDS, permission
 from mcp_switcher.service import Service
 from mcp_switcher.startup import prune_configured_access
 
@@ -73,6 +74,23 @@ async def rotation_contract(req, master, key, team_id, sid):
         upstream = LiteLLM(settings)
         service = Service(db, upstream, [admin, user], settings)
         try:
+            original_inspect = upstream.inspect_key
+            baseline = await original_inspect(key)
+
+            async def inspect_fixture(candidate):
+                info = await original_inspect(candidate)
+                if info is not None and candidate != key:
+                    # Only disposable fixture settings are compared, never credentials.
+                    before = {field: baseline.get(field) for field in GRANT_FIELDS}
+                    after = {field: info.get(field) for field in GRANT_FIELDS}
+                    before["object_permission"] = permission(before["object_permission"])
+                    after["object_permission"] = permission(after["object_permission"])
+                    differences = {field: [before[field], after[field]] for field in before if before[field] != after[field]}
+                    if differences:
+                        print("CI fixture grant differences:", json.dumps(differences, sort_keys=True))
+                return info
+
+            upstream.inspect_key = inspect_fixture
             preview = await service.rotation.execute(admin, user.name, "preview")
             args = (admin, user.name, "rotate", preview["revision"], preview["operation_id"])
             result = await service.rotation.execute(*args)
