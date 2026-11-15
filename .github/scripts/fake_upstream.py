@@ -18,7 +18,8 @@ class Handler(BaseHTTPRequestHandler):
         data = {
             "/v1/mcp/server": [{"server_id": "fixture", "alias": "fixture", "server_name": "CI fixture"},
                                 {"server_id": "obsolete", "alias": "obsolete", "server_name": "Removed reference"}],
-            "/key/info": {"info": {"team_id": "ci-user", "object_permission": key_permission}},
+            "/key/info": {"info": {"team_id": "ci-user", "models": ["no-default-models"],
+                                     "object_permission": key_permission}},
             "/team/info": {"team_info": {"team_id": "ci-user", "object_permission": permission}, "keys": [{}]},
             "/mcp-rest/tools/list": {"tools": [{"name": "read", "description": "Read a fixture"}]},
         }.get(path)
