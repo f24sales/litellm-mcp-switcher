@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import authenticate
-from .models import ApplyInput, Problem, ProjectInput, RevisionInput, ToggleInput
+from .models import ApplyInput, Problem, ProjectInput, RevisionInput, RotateInput, ToggleInput
 
 
 def create_web(service, identities):
@@ -102,6 +102,16 @@ def create_web(service, identities):
     def admin(user):
         if not user.admin:
             raise Problem(403, "Administrative access required")
+
+    @app.post("/api/admin/users/{name}/rotation/preview")
+    async def preview_rotation(name: str, user=Depends(actor)):
+        admin(user)
+        return await service.rotation.execute(user, name, "preview")
+
+    @app.post("/api/admin/users/{name}/rotation")
+    async def rotate(name: str, data: RotateInput, user=Depends(actor)):
+        admin(user)
+        return await service.rotation.execute(user, name, "rotate", data.revision, data.operation_id)
 
     @app.get("/api/admin/users")
     async def users(user=Depends(actor)):

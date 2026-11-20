@@ -16,7 +16,7 @@ async function api(path, options = {}) {
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401) logout();
-    throw new Error(typeof data.detail === 'string' ? data.detail : `Request rejected (${response.status})`);
+    throw Object.assign(new Error(typeof data.detail === 'string' ? data.detail : `Request rejected (${response.status})`), {status:response.status});
   }
   return data;
 }
@@ -47,6 +47,8 @@ function updateActions() {
   for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
   $('target-key').disabled = busy;
   $('admin-user').disabled = busy;
+  $('rotate').disabled = busy || !identity?.admin || !latest ||
+    latest.target_key !== $('admin-user').value;
   $('logout').disabled = busy;
   $('refresh-now').disabled = busy;
   $('save-config').hidden = !identity?.admin;
@@ -269,6 +271,25 @@ $('apply').onclick = () => guarded(async () => {
   if (identity.orchestrator) await refresh(true);
 });
 window.addEventListener('beforeunload', event => { if (draft.dirty) { event.preventDefault(); event.returnValue = ''; } });
+$('rotate').onclick = () => guarded(async () => {
+  const name = latest.target_key, path = base() + '/rotation';
+  if (!confirm(`Do you really want to rotate the virtual bearer for ${name}?\n\nOnce the replacement is verified, the old bearer will stop working. Update external clients and Citadel mappings afterwards.`)) return;
+  const storageKey = 'switcher.rotation.' + name;
+  let request = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
+  if (!request) {
+    const preview = await api(path + '/preview', {method:'POST'});
+    request = {revision:preview.revision, operation_id:preview.operation_id};
+    sessionStorage.setItem(storageKey, JSON.stringify(request));
+  }
+  try {
+    const result = await api(path, {method:'POST', body:JSON.stringify(request)});
+    if (['verified', 'conflict'].includes(result.status)) sessionStorage.removeItem(storageKey);
+    notify(result.message, result.status !== 'verified');
+  } catch (error) {
+    if (error.status === 409 && /fresh rotation preview/.test(error.message)) sessionStorage.removeItem(storageKey);
+    throw error;
+  }
+});
 $('save-config').onclick = () => guarded(async () => {
   const {target_key, revision} = latest;
   await api(`${base()}/permissions`, {method:'PUT', body:JSON.stringify({revision})});

@@ -45,6 +45,10 @@ class ToggleInput(RevisionInput):
     enabled: bool
 
 
+class RotateInput(RevisionInput):
+    operation_id: str = Field(min_length=36, max_length=36)
+
+
 class LoginInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bearer: str = Field(min_length=24, max_length=4096)
