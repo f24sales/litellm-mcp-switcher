@@ -24,6 +24,22 @@ function base() { return identity.admin ? `/api/admin/users/${encodeURIComponent
 function statePath() { return identity.admin ? base() : identity.orchestrator ? `/api/state?key_name=${encodeURIComponent($('target-key').value)}` : '/api/state'; }
 function selectionChanged() {
   preserveAlwaysOn(draft.selection, latest?.always_on_mcps);
+  if (identity.admin) {
+    const selection = clone(draft.selection), revision = latest.revision;
+    const path = base() + '/access';
+    ++refreshId;
+    draft.reset(latest, true);
+    renderCards();
+    return guarded(async () => {
+      try {
+        const state = await api(path, {method:'PUT', body:JSON.stringify({selection, revision})});
+        latest = state; draft.reset(state, true); renderCards();
+      } catch (error) {
+        if (identity?.admin) await refresh(true);
+        throw error;
+      }
+    });
+  }
   draft.edit(draft.selection);
   updateActions(); renderCards();
 }
@@ -31,6 +47,8 @@ function updateActions() {
   for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
   $('target-key').disabled = busy;
   $('admin-user').disabled = busy;
+  $('logout').disabled = busy;
+  $('refresh-now').disabled = busy;
   $('save-config').hidden = !identity?.admin;
   $('save-config').disabled = busy || latest?.config_changed !== true || draft.dirty || draft.conflict ||
     ['pending', 'uncertain'].includes(latest?.operation.status);
@@ -207,8 +225,8 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
     $('admin-bar').hidden = !identity.admin; $('project-bar').hidden = identity.admin;
     $('workspace-label').textContent = identity.admin ? 'ADMINISTRATION' : identity.orchestrator ? 'ORCHESTRATOR' : 'YOUR WORKSPACE';
     $('mode-description').textContent = identity.admin ? 'Define the MCP servers and tools each user may choose from.' : 'Choose your tools. Save a project. Apply when you\'re ready.';
-    $('apply').textContent = identity.admin ? 'Update access ↗' : 'Apply selection ↗';
-    $('apply-note').textContent = identity.admin ? 'Revocations also limit existing projects and active selections.' : 'Applies to every client using your assigned LiteLLM key.';
+    $('apply').hidden = $('discard').hidden = identity.admin;
+    $('apply-note').textContent = identity.admin ? 'Changes apply immediately. Save config keeps server grants across restarts.' : 'Applies to every client using your assigned LiteLLM key.';
     if (identity.admin) { const data = await api('/api/admin/users'); $('admin-user').replaceChildren(...data.users.map(name => new Option(name, name))); }
     const value = String(identity.refresh_seconds); if (![...$('refresh').options].some(o => o.value === value)) $('refresh').add(new Option(`${value} seconds`, value));
     $('refresh').value = value; await refresh(true); setTimer();
@@ -246,7 +264,7 @@ $('delete-project').onclick = () => guarded(async () => {
   }
 });
 $('apply').onclick = () => guarded(async () => {
-  const data = await api(identity.admin ? `${base()}/access` : '/api/apply', {method:identity.admin ? 'PUT' : 'POST', body:JSON.stringify({selection:draft.selection, revision:draft.revision})});
+  const data = await api('/api/apply', {method:'POST', body:JSON.stringify({selection:draft.selection, revision:draft.revision})});
   latest = data; draft.reset(data, identity.admin); renderCards(); updateActions(); notify('Access verified in LiteLLM.');
   if (identity.orchestrator) await refresh(true);
 });
