@@ -48,10 +48,15 @@ async def test_immediate_switch_and_saved_restart_boundary(setup, tmp_path):
         async def toggle(headers, enabled):
             return await c.put(path, headers=headers, json={"revision": (await state())["revision"],
                                                             "enabled": enabled})
+        async def config_changed():
+            return (await c.get("/api/admin/users/alice", headers=admin)).json()["config_changed"]
+        assert await config_changed() is False
+        assert "config_changed" not in await state()
         assert len((await state())["servers"]) == 2
         assert (await toggle(operator, True)).status_code == 403
         assert (await toggle(admin, True)).status_code == 200
         assert "tasks" in (await state())["active"]["servers"]
+        assert await config_changed() is True
         await restart()
         assert "tasks" not in (await state())["ceiling"]["servers"]
         assert (await toggle(admin, True)).status_code == 200
@@ -63,3 +68,14 @@ async def test_immediate_switch_and_saved_restart_boundary(setup, tmp_path):
         after = await state()
         assert "tasks" in after["ceiling"]["servers"] and "tasks" not in after["active"]["servers"]
         assert read(config)["bob"] == ["docs", "tasks"]
+        assert await config_changed() is False
+        config.write_text('{"alice":["tasks","docs"],"bob":[]}')
+        assert await config_changed() is False
+        original = config.stat()
+        assert (await c.put("/api/admin/users/alice/permissions", headers=admin,
+                            json={"revision": after["revision"]})).status_code == 200
+        assert config.stat().st_ino == original.st_ino
+        config.write_text('{"alice":[],"bob":[]}')
+        assert await config_changed() is True
+        config.unlink()
+        assert await config_changed() is None

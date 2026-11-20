@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -33,8 +34,11 @@ def edit(path, *, create=False):
     path = Path(path)
     with path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        entries = {} if create and not path.exists() else read(path)
+        original = None if create and not path.exists() else read(path)
+        entries = {} if original is None else deepcopy(original)
         yield entries
+        if entries == original:
+            return
         validate(entries)
         with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as tmp:
             try:

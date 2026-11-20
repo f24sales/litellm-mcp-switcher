@@ -9,13 +9,20 @@ from .models import Problem
 from .litellm import intersect
 from .rotation import Rotation
 from .models import ApplyInput
-from .permissions import edit
+from .permissions import edit, read
 
 
 def revision(ceiling, active, raw=None, always_on=(), target_key=""):
     value = {"ceiling": ceiling.model_dump(), "active": active.model_dump(), "raw": raw,
              "always_on": sorted(always_on), "target_key": target_key}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def ceiling_aliases(servers, allowed):
+    aliases = [s["alias"] for s in servers if s["server_id"] in allowed]
+    if not all(aliases) or len(set(aliases)) != len(allowed):
+        raise Problem(409, "Cannot persist an ambiguous MCP alias")
+    return sorted(aliases)
 
 
 class Service:
@@ -86,13 +93,22 @@ class Service:
         operation = await self.reconcile(target, info, ceiling, active)
         visible = inventory if actor.admin or show_catalog and actor.orchestrator else [
             s for s in inventory if s["server_id"] in ceiling.servers]
-        return {"user": target.name, "target_key": target.name, "admin": actor.admin, "servers": visible,
+        state = {"user": target.name, "target_key": target.name, "admin": actor.admin, "servers": visible,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
                 "always_on_mcps": list(self.always_on(target, inventory)),
                 "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps, target.name),
                 "projects": self.db.list_projects(target.name),
                 "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
                 "refresh_seconds": self.settings.webui_refresh_seconds}
+
+        if actor.admin:
+            try:
+                saved = read(self.settings.permissions_file)[target.name]
+                state["config_changed"] = ceiling_aliases(inventory, ceiling.servers) != sorted(saved)
+            except (OSError, ValueError, KeyError, Problem):
+                # Keep live access management available if the saved config cannot be compared.
+                state["config_changed"] = None
+        return state
 
     async def tools(self, actor, server_id, name=None, refresh=False):
         _, inventory, _, _, ceiling, _ = await self.snapshot(actor, name)
@@ -184,15 +200,13 @@ class Service:
             state = await self.state(actor, name)
             if state["revision"] != expected:
                 raise Problem(409, "Access changed; refresh before saving")
-            allowed = state["ceiling"]["servers"]
-            aliases = [s["alias"] for s in state["servers"] if s["server_id"] in allowed]
-            if not all(aliases) or len(set(aliases)) != len(allowed):
-                raise Problem(409, "Cannot persist an ambiguous MCP alias")
+            aliases = ceiling_aliases(state["servers"], state["ceiling"]["servers"])
             try:
                 with edit(self.settings.permissions_file) as entries:
                     if name not in entries:
                         raise Problem(409, "Target missing from permissions.json")
-                    entries[name] = sorted(aliases)
+                    if sorted(entries[name]) != aliases:
+                        entries[name] = aliases
             except (ValueError, OSError) as exc:
                 raise Problem(503, "Cannot save permissions.json; check the permission directory") from exc
             return {"saved": name}

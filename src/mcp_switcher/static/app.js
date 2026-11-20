@@ -32,8 +32,10 @@ function updateActions() {
   $('target-key').disabled = busy;
   $('admin-user').disabled = busy;
   $('save-config').hidden = !identity?.admin;
-  $('save-config').disabled = busy || !latest || draft.dirty || draft.conflict ||
+  $('save-config').disabled = busy || latest?.config_changed !== true || draft.dirty || draft.conflict ||
     ['pending', 'uncertain'].includes(latest?.operation.status);
+  $('save-config').title = latest?.config_changed === false ? 'Already saved in permissions.json' :
+    latest && latest.config_changed == null ? 'Cannot compare with permissions.json' : '';
   for (const control of document.querySelectorAll('.active-switch'))
     control.disabled = control.dataset.locked === 'true' || busy || !latest || draft.dirty || draft.conflict;
   $('conflict').hidden = !draft.conflict;
@@ -250,6 +252,10 @@ $('apply').onclick = () => guarded(async () => {
 });
 window.addEventListener('beforeunload', event => { if (draft.dirty) { event.preventDefault(); event.returnValue = ''; } });
 $('save-config').onclick = () => guarded(async () => {
-  await api(`${base()}/permissions`, {method:'PUT', body:JSON.stringify({revision:latest.revision})});
-  notify(`Saved permissions for ${latest.target_key}.`);
+  const {target_key, revision} = latest;
+  await api(`${base()}/permissions`, {method:'PUT', body:JSON.stringify({revision})});
+  if (latest?.target_key !== target_key) return;
+  refreshId++;
+  if (latest.revision === revision) latest.config_changed = false;
+  notify(`Saved permissions for ${target_key}.`);
 });
