@@ -30,6 +30,12 @@ function selectionChanged() {
 function updateActions() {
   for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
   $('target-key').disabled = busy;
+  $('admin-user').disabled = busy;
+  $('save-config').hidden = !identity?.admin;
+  $('save-config').disabled = busy || !latest || draft.dirty || draft.conflict ||
+    ['pending', 'uncertain'].includes(latest?.operation.status);
+  for (const control of document.querySelectorAll('.active-switch'))
+    control.disabled = control.dataset.locked === 'true' || busy || !latest || draft.dirty || draft.conflict;
   $('conflict').hidden = !draft.conflict;
   $('draft-state').textContent = draft.dirty ? 'Unsaved selection' : 'In sync';
   $('selection-count').textContent = `${Object.keys(draft.selection.servers).length} selected`;
@@ -72,18 +78,44 @@ function renderCards() {
     const pinned = latest.always_on_mcps?.includes(sid);
     if (!`${server.alias} ${server.server_name}`.toLowerCase().includes(search)) continue;
     const selected = Object.hasOwn(draft.selection.servers, sid);
+    const allowed = Object.hasOwn(latest.ceiling.servers, sid);
     const card = node('article', '', `server${selected ? ' selected' : ''}`);
     const head = node('div', '', 'server-head');
     const check = node('input', '', 'server-check'); check.type = 'checkbox'; check.checked = selected;
-    check.disabled = pinned;
-    check.setAttribute('aria-label', `Select ${server.alias || server.server_name}`);
+    check.checked = identity.orchestrator ? allowed : selected;
+    check.disabled = pinned || identity.orchestrator;
+    check.setAttribute('aria-label', `${identity.admin || identity.orchestrator ? 'Allowed' : 'Selected'}: ${server.alias || server.server_name}`);
     check.onchange = () => {
       if (check.checked) draft.selection.servers[sid] = null; else delete draft.selection.servers[sid];
       selectionChanged();
     };
     const heading = node('div', '', 'server-heading');
-    heading.append(node('h2', server.server_name || server.alias, 'server-title'), node('div', server.alias, 'alias'));
-    if (pinned) heading.append(node('div', 'Always enabled', 'status reachable'));
+    const title = node('h2', server.server_name || server.alias, 'server-title');
+    if (server.icon) {
+      const icon = node('img'); icon.alt = ''; icon.width = icon.height = 16;
+      icon.onerror = () => icon.remove(); icon.src = server.icon; title.prepend(icon);
+    }
+    if (identity.admin || identity.orchestrator) {
+      const toggle = node('input', '', 'active-switch');
+      toggle.type = 'checkbox'; toggle.setAttribute('role', 'switch');
+      toggle.setAttribute('aria-label', `Active: ${server.alias || server.server_name}`);
+      toggle.checked = Object.hasOwn(latest.active.servers, sid);
+      toggle.dataset.locked = String(Boolean(pinned || (!identity.admin && !allowed) ||
+        ['pending', 'uncertain'].includes(latest.operation.status)));
+      toggle.disabled = busy || draft.dirty || draft.conflict || toggle.dataset.locked === 'true';
+      toggle.onchange = () => {
+        const enabled = toggle.checked, target = latest.target_key, revision = latest.revision;
+        toggle.checked = !enabled;
+        guarded(async () => {
+          try {
+            await api(`/api/targets/${encodeURIComponent(target)}/servers/${encodeURIComponent(sid)}/active`,
+              {method:'PUT', body:JSON.stringify({enabled, revision})});
+          } finally { await refresh(true); }
+        });
+      };
+      title.append(toggle);
+    }
+    heading.append(title, node('div', server.alias, 'alias'));
     const entry = catalog.get(sid);
     head.append(check, heading, node('span', entry?.status || 'unknown', `status ${entry?.status || ''}`));
     card.append(head);
@@ -106,7 +138,8 @@ function renderCards() {
         if (details.isConnected && details.open) renderCards();
       }
     };
-    card.append(details); root.append(card);
+    if (allowed || identity.admin) card.append(details);
+    root.append(card);
   }
 }
 function renderTools(sid, body) {
@@ -145,7 +178,7 @@ function renderTools(sid, body) {
   body.append(list);
   if (!entry.tools.length) body.append(node('p', 'Discovery succeeded; this server returned no tools.'));
 }
-async function guarded(fn) { if (busy) return; busy = true; updateActions(); hideMessage(); try { await fn(); } catch (e) { notify(e.message, true); } finally { busy = false; updateActions(); } }
+async function guarded(fn) { if (busy) return; busy = true; $('servers').inert = true; updateActions(); hideMessage(); try { await fn(); } catch (e) { notify(e.message, true); } finally { busy = false; $('servers').inert = false; updateActions(); } }
 function askName(title, value = '') {
   return new Promise(resolve => { const dialog = $('name-dialog'); $('dialog-title').textContent = title; $('project-name').value = value;
     dialog.returnValue = ''; dialog.addEventListener('close', () => resolve(dialog.returnValue === 'save' ? $('project-name').value.trim() : null), {once:true}); dialog.showModal(); });
@@ -165,7 +198,7 @@ function setTimer() { clearInterval(timer); const seconds = Number($('refresh').
 function logout() { clearInterval(timer); token = ''; identity = null; latest = null; refreshId++; catalog.clear(); expanded.clear(); projectId = ''; draft.dirty = false; draft.epoch++; $('workspace').hidden = true; $('identity').hidden = true; $('login').hidden = false; $('bearer').value = ''; }
 $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer').value.trim(); $('bearer').value = ''; (async () => {
   try {
-    identity = await api('/api/me'); $('who').textContent = identity.name; $('identity').hidden = false;
+    identity = await api('/api/me'); hideMessage(); $('who').textContent = identity.name; $('identity').hidden = false;
     $('login').hidden = true; $('workspace').hidden = false;
     $('target-bar').hidden = !identity.orchestrator;
     if (identity.orchestrator) $('target-key').replaceChildren(...identity.key_names.map(name => new Option(name, name)));
@@ -187,11 +220,11 @@ $('target-key').onchange = () => {
   catalog.clear(); expanded.clear(); projectId = ''; latest = null;
   refreshId++; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true);
 };
-$('admin-user').onchange = () => { catalog.clear(); expanded.clear(); draft.dirty = false; draft.epoch++; refresh(true); };
+$('admin-user').onchange = () => { catalog.clear(); expanded.clear(); latest = null; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true); };
 $('search').oninput = renderCards;
 $('refresh').onchange = setTimer;
 $('refresh-now').onclick = () => refresh();
-$('select-all').onclick = () => { for (const server of latest.servers) draft.selection.servers[server.server_id] = null; selectionChanged(); };
+$('select-all').onclick = () => { for (const server of latest.servers) if (identity.admin || Object.hasOwn(latest.ceiling.servers, server.server_id)) draft.selection.servers[server.server_id] = null; selectionChanged(); };
 $('clear-all').onclick = () => { draft.selection.servers = {}; selectionChanged(); };
 $('discard').onclick = () => { projectId = ''; refresh(true); };
 $('project').onchange = () => {
@@ -213,5 +246,10 @@ $('delete-project').onclick = () => guarded(async () => {
 $('apply').onclick = () => guarded(async () => {
   const data = await api(identity.admin ? `${base()}/access` : '/api/apply', {method:identity.admin ? 'PUT' : 'POST', body:JSON.stringify({selection:draft.selection, revision:draft.revision})});
   latest = data; draft.reset(data, identity.admin); renderCards(); updateActions(); notify('Access verified in LiteLLM.');
+  if (identity.orchestrator) await refresh(true);
 });
 window.addEventListener('beforeunload', event => { if (draft.dirty) { event.preventDefault(); event.returnValue = ''; } });
+$('save-config').onclick = () => guarded(async () => {
+  await api(`${base()}/permissions`, {method:'PUT', body:JSON.stringify({revision:latest.revision})});
+  notify(`Saved permissions for ${latest.target_key}.`);
+});

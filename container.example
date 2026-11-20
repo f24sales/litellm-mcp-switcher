@@ -3,6 +3,7 @@
 #container-image-key: LITELLM_MCP_SWITCHER_IMAGE
 LITELLM_MCP_SWITCHER_CONTAINER_NAME=litellm-mcp-switcher
 LITELLM_MCP_SWITCHER_IMAGE=ghcr.io/f24sales/litellm-mcp-switcher-safrano9999:latest
+LITELLM_MCP_SWITCHER_UI_VOLUMES=./permissions:/etc/litellm-mcp-switcher/permissions:Z,litellm-mcp-switcher-icons:/opt/f24sales/litellm-mcp-switcher/icons:Z
 
 # Leave blank to disable host publication; internal enablement is separate.
 #container-port: LITELLM_MCP_SWITCHER_WEBUI_PUBLISH_PORT 8080

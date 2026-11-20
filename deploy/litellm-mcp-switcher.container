@@ -12,6 +12,9 @@ NetworkAlias=litellm-mcp-switcher
 EnvironmentFile=%h/.config/litellm-mcp-switcher/config.conf
 EnvironmentFile=%h/.config/litellm-mcp-switcher/.env
 Volume=litellm-mcp-switcher-sqlite.volume:/opt/f24sales/litellm-mcp-switcher/sqlite:Z
+Volume=litellm-mcp-switcher-icons.volume:/opt/f24sales/litellm-mcp-switcher/icons:Z
+Volume=%h/.config/litellm-mcp-switcher/permissions:/etc/litellm-mcp-switcher/permissions:Z
+Environment=LITELLM_MCP_SWITCHER_PERMISSIONS_FILE=/etc/litellm-mcp-switcher/permissions/permissions.json
 NoNewPrivileges=true
 ReadOnly=true
 Tmpfs=/tmp:rw,nosuid,nodev,size=32m

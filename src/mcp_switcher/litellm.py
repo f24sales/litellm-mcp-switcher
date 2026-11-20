@@ -4,6 +4,7 @@ import json
 import httpx
 
 from .models import Problem, Selection
+from .icons import IconCache
 
 DENY = "no-mcp-servers"
 MCP_FIELDS = {"mcp_servers", "mcp_access_groups", "mcp_tool_permissions", "mcp_toolsets"}
@@ -51,6 +52,7 @@ def intersect(selection: Selection, ceiling: Selection) -> Selection:
 class LiteLLM:
     def __init__(self, settings, transport=None):
         self.admin = settings.litellm_admin_virtual_key.get_secret_value()
+        self.icons = IconCache(settings.icon_directory)
         self.client = httpx.AsyncClient(base_url=settings.litellm_api_base_url.rstrip("/"),
             timeout=settings.litellm_request_timeout_seconds, transport=transport, follow_redirects=False)
 
@@ -71,7 +73,8 @@ class LiteLLM:
         data = await self.request("GET", "/v1/mcp/server")
         if not isinstance(data, list):
             raise Problem(502, "LiteLLM MCP registry is unavailable")
-        return [{k: s.get(k) for k in ("server_id", "server_name", "alias", "description")}
+        return [{**{k: s.get(k) for k in ("server_id", "server_name", "alias", "description")},
+                 "icon": self.icons.lookup(s)}
                 for s in data]
 
     async def scope(self, identity, inventory, *, ignore_missing=False):

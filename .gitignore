@@ -12,6 +12,7 @@ dist/
 *.db
 *.sqlite*
 rotation-credentials.json*
+/permissions/
 
 docker-compose.yml
 /litellm-mcp-switcher.container

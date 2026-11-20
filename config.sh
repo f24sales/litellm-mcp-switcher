@@ -3001,6 +3001,10 @@ if ! $FEDORA_CUMULATIVE_EXAMPLES; then
     for example in "$DIR"/*build.conf_example; do configure_from_example "$example" "$BUILD_FILE" "$(basename "$BUILD_FILE")"; done
 fi
 [ -z "$ENV_EXAMPLE" ] || configure_from_example "$ENV_EXAMPLE" "$ENV_FILE" "$(basename "$ENV_FILE")"
+if [[ -f "$DIR/litellm_add_virtual.py" ]] && grep -q '^LITELLM_MCP_SWITCHER_BEARER_ALIAS=' "$ENV_FILE"; then
+    PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m mcp_switcher.permissions \
+        --env "$ENV_FILE" --output "$(dirname "$ENV_FILE")/permissions/permissions.json" --clean || exit 1
+fi
 reconcile_db_auto_config
 [ -z "$CONFIG_EXAMPLE" ] || configure_from_example "$CONFIG_EXAMPLE" "$CONFIG_FILE" "$(basename "$CONFIG_FILE")"
 if [ "$NO_CONTAINER" != "true" ]; then

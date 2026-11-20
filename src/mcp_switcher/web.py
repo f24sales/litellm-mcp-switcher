@@ -1,14 +1,15 @@
 """FastAPI endpoints; the browser retains a bearer only in page memory."""
 from pathlib import Path
+import re
 
 from fastapi import Depends, FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import authenticate
-from .models import ApplyInput, Problem, ProjectInput
+from .models import ApplyInput, Problem, ProjectInput, RevisionInput, ToggleInput
 
 
 def create_web(service, identities):
@@ -51,6 +52,13 @@ def create_web(service, identities):
         # Listener readiness is local; upstream failures are shown through authenticated discovery.
         return {"status": "ok", "service": "litellm-mcp-switcher"}
 
+    @app.get("/icons/{filename}", include_in_schema=False)
+    async def icon(filename: str):
+        path = Path(service.settings.icon_directory) / filename
+        if not re.fullmatch(r"[0-9a-f]{64}\.png", filename) or not path.is_file():
+            raise Problem(404, "No icon")
+        return FileResponse(path, media_type="image/png")
+
     @app.get("/api/me")
     async def me(user=Depends(actor)):
         return {"name": user.name, "admin": user.admin,
@@ -58,8 +66,18 @@ def create_web(service, identities):
                 "refresh_seconds": service.settings.webui_refresh_seconds}
 
     @app.get("/api/state")
-    async def state(user=Depends(selected)):
-        return await service.state(user)
+    async def state(key_name: str | None = None, user=Depends(actor)):
+        if user.admin:
+            raise Problem(403, "Choose an administrative target")
+        return await service.state(user, key_name, show_catalog=True)
+
+    @app.put("/api/targets/{name}/servers/{sid}/active")
+    async def toggle(name: str, sid: str, data: ToggleInput, user=Depends(actor)):
+        return await service.toggle(user, name, sid, data)
+
+    @app.put("/api/admin/users/{name}/permissions")
+    async def save(name: str, data: RevisionInput, user=Depends(actor)):
+        return await service.save_permissions(user, name, data.revision)
 
     @app.get("/api/servers/{server_id}/tools")
     async def tools(server_id: str, refresh: bool = False, user=Depends(selected)):

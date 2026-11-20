@@ -20,6 +20,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/f24sales/litellm-mcp-switcher/sqlite
+ReadWritePaths=/etc/litellm-mcp-switcher/permissions /opt/f24sales/litellm-mcp-switcher/icons
 
 [Install]
 WantedBy=multi-user.target

@@ -8,6 +8,8 @@ from dataclasses import replace
 from .models import Problem
 from .litellm import intersect
 from .rotation import Rotation
+from .models import ApplyInput
+from .permissions import edit
 
 
 def revision(ceiling, active, raw=None, always_on=(), target_key=""):
@@ -79,10 +81,11 @@ class Service:
             self.db.finish(target.name, operation["id"], "conflict", "Upstream state differs; review before applying")
         return self.db.operation(target.name)
 
-    async def state(self, actor, name=None):
+    async def state(self, actor, name=None, *, show_catalog=False):
         target, inventory, info, _, ceiling, active = await self.snapshot(actor, name)
         operation = await self.reconcile(target, info, ceiling, active)
-        visible = inventory if actor.admin else [s for s in inventory if s["server_id"] in ceiling.servers]
+        visible = inventory if actor.admin or show_catalog and actor.orchestrator else [
+            s for s in inventory if s["server_id"] in ceiling.servers]
         return {"user": target.name, "target_key": target.name, "admin": actor.admin, "servers": visible,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
                 "always_on_mcps": list(self.always_on(target, inventory)),
@@ -156,7 +159,45 @@ class Service:
         async with self.key_locks[target.name]:
             return await self._apply(actor, data, name, ceiling_change)
 
-    async def _apply(self, actor, data, name=None, ceiling_change=False):
+    async def toggle(self, actor, name, sid, data):
+        target = self.target(actor, name)
+        async with self.key_locks[target.name]:
+            _, inventory, _, _, ceiling, active = await self.snapshot(actor, name)
+            if sid not in {s["server_id"] for s in inventory}:
+                raise Problem(404, "Unknown MCP server")
+            if sid in self.always_on(target, inventory) or (sid not in ceiling.servers and not actor.admin):
+                raise Problem(403, "This switch is locked")
+            grant = data.enabled and sid not in ceiling.servers
+            selection = (ceiling if grant else active).model_copy(deep=True)
+            if data.enabled:
+                selection.servers.setdefault(sid, ceiling.servers.get(sid))
+            else:
+                selection.servers.pop(sid, None)
+            return await self._apply(actor, ApplyInput(selection=selection, revision=data.revision),
+                                     name, grant, enable_new=sid if grant else None)
+
+    async def save_permissions(self, actor, name, expected):
+        if not actor.admin:
+            raise Problem(403, "Administrative access required")
+        target = self.target(actor, name)
+        async with self.key_locks[target.name]:
+            state = await self.state(actor, name)
+            if state["revision"] != expected:
+                raise Problem(409, "Access changed; refresh before saving")
+            allowed = state["ceiling"]["servers"]
+            aliases = [s["alias"] for s in state["servers"] if s["server_id"] in allowed]
+            if not all(aliases) or len(set(aliases)) != len(allowed):
+                raise Problem(409, "Cannot persist an ambiguous MCP alias")
+            try:
+                with edit(self.settings.permissions_file) as entries:
+                    if name not in entries:
+                        raise Problem(409, "Target missing from permissions.json")
+                    entries[name] = sorted(aliases)
+            except (ValueError, OSError) as exc:
+                raise Problem(503, "Cannot save permissions.json; check the permission directory") from exc
+            return {"saved": name}
+
+    async def _apply(self, actor, data, name=None, ceiling_change=False, *, enable_new=None):
         if ceiling_change and not actor.admin:
             raise Problem(403, "Administrative access required")
         target, inventory, info, team, ceiling, active = await self.snapshot(actor, name)
@@ -170,6 +211,8 @@ class Service:
                                    selected if ceiling_change else ceiling)
         if ceiling_change:
             desired_active = self.protect(target, inventory, desired_active)
+            if enable_new is not None:
+                desired_active.servers[enable_new] = None
         desired = ({"ceiling": selected.model_dump(), "active": desired_active.model_dump()}
                    if ceiling_change else desired_active.model_dump())
         kind = "ceiling" if ceiling_change else "active"

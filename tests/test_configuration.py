@@ -5,6 +5,8 @@ from mcp_switcher.config import authenticate, load_configuration
 
 def configure(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_MCP_SWITCHER_PERMISSIONS_FILE", str(tmp_path / "permissions.json"))
+    (tmp_path / "permissions.json").write_text('{"alice":[],"bob":[]}')
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE", str(tmp_path / "rotation.json"))
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY", "admin-" + "a" * 40)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_BEARER_ALIAS", "alice")
@@ -69,7 +71,7 @@ def test_cross_user_bearer_role_collision_is_rejected(monkeypatch, tmp_path):
 def test_always_on_aliases_belong_to_each_repeat_group(monkeypatch, tmp_path):
     configure(monkeypatch, tmp_path)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "switcher_alice, other_control")
-    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", "switcher_alice, other_control")
+    (tmp_path / "permissions.json").write_text('{"alice":["switcher_alice","other_control"],"bob":["switcher_bob"]}')
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_BEARER_ALIAS_02", "bob")
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_SWITCHER_BEARER_02", "bob-switcher-" + "s" * 40)
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_BEARER_02", "bob-litellm-" + "l" * 40)
@@ -92,7 +94,7 @@ def test_allowed_aliases_blank_and_always_on_conflict(monkeypatch, tmp_path):
     configure(monkeypatch, tmp_path)
     _, users = load_configuration()
     assert users[1].allowed_mcps == ()
-    monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS", "tasks, docs")
+    (tmp_path / "permissions.json").write_text('{"alice":["tasks","docs"]}')
     _, users = load_configuration()
     assert users[1].allowed_mcps == ("tasks", "docs")
     monkeypatch.setenv("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS", "other")

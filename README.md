@@ -137,7 +137,17 @@ Install the Python package first (`python3 -m pip install .`). Before running `.
 
 Choosing **2** creates a dedicated team whose MCP ceiling is `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS`, then a single MCP-only virtual key with that initial selection. The returned bearer is saved in the corresponding private `.env` field. Existing keys are retained on reruns. Skip and non-interactive configuration never create a remote key.
 
-The CSV is also the startup removal boundary for this bearer alias. Before accepting connections, the Switcher removes MCP references absent from `LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS` through the LiteLLM API, from this key and its dedicated team, and prunes its saved projects. Blank or omitted means no MCP access for that configured bearer. Listed MCPs keep their current grants, active selection and tool restrictions; startup does not grant or enable them automatically. Unconfigured bearers and the global MCP registry are untouched. Configuration is read at process start, so changes require a restart.
+The CSV is a setup input. Setup moves it into `permissions/permissions.json`, keyed by bearer alias, and removes the CSV fields from the generated environment. An empty array permits no MCPs. Before serving requests the Switcher prunes any grants outside this JSON boundary from each managed team, key and saved project. It preserves the current on/off and tool selections within the boundary.
+
+For an existing installation run the following with the updated package from the directory containing the Switcher's environment files before starting the new version:
+
+```sh
+python3 -m mcp_switcher.permissions --env .env --output permissions/permissions.json --clean
+```
+
+The migration verifies existing entries before removing legacy fields. The service requires an entry for every managed alias. Keep the permissions directory writable by the service (container UID 10001, including its rootless user mapping). Mount the directory for atomic replacement, and install the icons volume unit alongside the updated Quadlet. Only the permissions directory needs to be shared with the configuration writer; login credentials stay in the environment file. The separate named icons volume is a disposable cache.
+
+In the admin workspace the checkbox edits the team's live access ceiling. **Update access** applies that draft. **Save config** records the confirmed ceiling for the selected alias across restarts. A switch next to the MCP name controls the key's active selection immediately. Admins can grant and enable a server in one operation. Orchestrators see the target's grants as read-only checkboxes and can switch permitted servers. Locked switches retain their actual position.
 
 Provisioning uses `LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY`. It needs `GET /v1/mcp/server`, `GET /team/info`, `POST /team/new`, `POST /team/update` and `POST /key/generate` permissions. The runtime management key still needs the permissions listed below to manage the newly created team and key.
 

@@ -9,6 +9,7 @@ from dotenv import dotenv_values
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
+from .permissions import read as read_permissions
 
 PREFIX = "LITELLM_MCP_SWITCHER_"
 SQL_PREFIX = "litellm_mcp_switcher"
@@ -36,6 +37,8 @@ class Settings(BaseSettings):
     litellm_api_base_url: str = "http://litellm:4000"
     litellm_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
     webui_enabled: bool = True
+    permissions_file: str = "permissions/permissions.json"
+    icon_directory: str = "/opt/f24sales/litellm-mcp-switcher/icons"
     mcp_enabled: bool = True
     webui_refresh_seconds: int = Field(default=30, ge=5, le=3600)
     rotation_credentials_file: str = "/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json"
@@ -115,6 +118,7 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
             yield {field: short.get(key + suffix, "").strip() for field, key in fields.items()}
 
     targets = []
+    permissions = read_permissions(settings.permissions_file)
     for group in groups("KEY"):
         if not any(group.values()):
             continue
@@ -122,9 +126,11 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
         if len(key) < 24 or key in keys:
             raise ValueError("Each managed key requires a complete, unique LiteLLM bearer")
         keys.add(key)
+        if group["NAME"] not in permissions:
+            raise ValueError("Missing permissions.json entry for configured alias")
         identity = Identity(group["NAME"], group["SWITCHER_BEARER"], key,
                             always_on_mcps=csv_names(group["ALWAYS_ON_MCPS"], "Always-on aliases"),
-                            allowed_mcps=csv_names(group["ALLOWED_MCPS"], "Allowed MCP aliases"))
+                            allowed_mcps=tuple(permissions[group["NAME"]]))
         if not set(identity.always_on_mcps) <= set(identity.allowed_mcps):
             raise ValueError("Always-on aliases must be included in the allowed MCP aliases")
         add(identity)

@@ -5,6 +5,8 @@ import re
 import sys
 import uuid
 from urllib.parse import urlsplit
+from pathlib import Path
+from .permissions import read as read_permissions
 
 import httpx
 from dotenv import dotenv_values
@@ -26,6 +28,9 @@ class Provisioner:
         self.name = (values.get("LITELLM_MCP_SWITCHER_BEARER_ALIAS" + suffix) or "").strip()
         csv = values.get("LITELLM_MCP_SWITCHER_KEY_ALLOWED_MCPS" + suffix) or ""
         self.aliases = list(dict.fromkeys(a.strip() for a in csv.split(",") if a.strip()))
+        saved_path = Path(values.get("LITELLM_MCP_SWITCHER_PERMISSIONS_FILE") or "permissions/permissions.json")
+        if saved_path.exists() and self.name in (saved := read_permissions(saved_path)):
+            self.aliases = saved[self.name]
         self.always = [a.strip() for a in (values.get("LITELLM_MCP_SWITCHER_KEY_ALWAYS_ON_MCPS" + suffix) or "").split(",") if a.strip()]
         base = (values.get("LITELLM_MCP_SWITCHER_API_BASE_URL") or "").strip().rstrip("/")
         admin = values.get("LITELLM_MCP_SWITCHER_ADMIN_VIRTUAL_KEY") or ""

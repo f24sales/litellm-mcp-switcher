@@ -37,6 +37,14 @@ class ApplyInput(BaseModel):
     revision: str = Field(min_length=64, max_length=64)
 
 
+class RevisionInput(BaseModel):
+    revision: str = Field(min_length=64, max_length=64)
+
+
+class ToggleInput(RevisionInput):
+    enabled: bool
+
+
 class LoginInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bearer: str = Field(min_length=24, max_length=4096)
