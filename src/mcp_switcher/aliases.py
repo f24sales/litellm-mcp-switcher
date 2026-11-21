@@ -57,14 +57,16 @@ class AliasManager:
                         target = self.service.target(actor, name)
                         if alias_revision(target) != revision:
                             raise Problem(409, "Alias or credentials changed. Reload the alias before continuing")
-                        if any(item["alias"] == name and item["status"] in ("pending", "uncertain", "retryable")
+                        if kind != "delete_login" and any(item["alias"] == name and item["status"] in ("pending", "uncertain", "retryable")
                                for item in data["operations"].values()):
                             raise Problem(409, "Finish the pending virtual key rotation first")
-                        if self.service.db.operation(target.owner)["status"] in ("pending", "uncertain"):
+                        if kind != "delete_login" and self.service.db.operation(target.owner)["status"] in ("pending", "uncertain"):
                             raise Problem(409, "Refresh and reconcile the pending access change first")
                         op = {"source": target.owner, "key": target.litellm_key}
                         if kind == "login":
                             op["login"] = secrets.token_urlsafe(32)
+                        elif kind == "delete_login":
+                            op["login"] = ""
                         op["allowed"] = list(target.allowed_mcps)
                         if kind == "rename":
                             op["new"] = new
@@ -164,7 +166,7 @@ class AliasManager:
             self.store.write(data)
         catalog = data.setdefault("catalog", {})
         record = catalog.setdefault(source, {"name": name})
-        if kind != "login":
+        if kind in ("create", "rename", "delete"):
             with edit(self.service.settings.permissions_file) as entries:
                 if kind == "create":
                     entries.setdefault(name, [])

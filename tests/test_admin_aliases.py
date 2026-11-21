@@ -110,6 +110,19 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
         assert (await c.get("/api/me", headers=auth(alice.bearer))).status_code == 401
         new_login = (await c.post(root + "/renamed/credentials/switcher")).json()["value"]
         assert restarted()["renamed"].bearer == new_login
+        login_path = root + "/renamed/login"
+        for token in (bob.bearer, op.bearer):
+            assert (await c.delete(login_path, params=await rev("renamed"), headers=auth(token))).status_code == 403
+        assert (await c.delete(login_path, params=old_rev)).status_code == 409
+        assert (await c.delete(login_path, params=await rev("renamed"))).status_code == 200
+        assert (await c.get("/api/me", headers=auth(new_login))).status_code == 401
+        assert (await c.post(root + "/renamed/credentials/switcher")).status_code == 404
+        assert (await c.post(root + "/renamed/credentials/virtual")).json()["value"] == alice.litellm_key
+        assert restarted()["renamed"].bearer == "" and restarted()["renamed"].litellm_key == alice.litellm_key
+        assert restarted()["operator"].key_names == ("renamed", "bob")
+        assert (await c.get(root + "/renamed")).json()["projects"][0]["name"] == "report"
+        assert (await c.post(login_path, params=await rev("renamed"))).status_code == 200
+        assert restarted()["renamed"].bearer not in ("", new_login)
         assert (await c.delete(root + "/renamed", params=await rev("renamed"))).status_code == 200
         assert alice.litellm_key not in fake.keys and bob.litellm_key in fake.keys
         assert (await c.get("/api/me", headers=auth(new_login))).status_code == 401

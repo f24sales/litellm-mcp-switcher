@@ -121,6 +121,10 @@ def create_web(service, identities):
     async def issue_login(name: str, revision: str, user=Depends(actor)):
         return await service.aliases.change(user, "login", name, revision=revision)
 
+    @app.delete("/api/admin/users/{name}/login")
+    async def delete_login(name: str, revision: str, user=Depends(actor)):
+        return await service.aliases.change(user, "delete_login", name, revision=revision)
+
     @app.post("/api/admin/users/{name}/credentials/{kind}")
     async def reveal(name: str, kind: Literal["virtual", "switcher"], user=Depends(actor)):
         admin(user)

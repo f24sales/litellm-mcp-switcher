@@ -281,7 +281,7 @@ Tool listings and calls enforce roles, including calls using cached tool names. 
 
 Select **New alias** to have LiteLLM generate the mandatory virtual bearer with empty MCP grants. Citadel uses the LiteLLM virtual bearer directly in its backend mapping in `CLOUDFLARE-API_access.json`. Use **Create login** only when the alias needs its own Switcher login. **Rename** preserves both credentials, projects and orchestrator assignments. **Delete** confirms the selected alias, revokes its virtual key and login, removes assignments and deletes that alias’s projects. New aliases can be managed by the administrator and their personal login.
 
-Each credential has a masked field, an eye button and a copy button. Only an authenticated administrator can request a single credential. **Rotate login** invalidates the previous Switcher login. **Rotate bearer** in the virtual bearer row uses the verified LiteLLM rotation. Update clients and any Citadel credential mappings that used a replaced bearer.
+Each credential has a masked field, an eye button and a copy button. Only an authenticated administrator can request a single credential. **Rotate login** replaces the current Switcher login. **Delete login** revokes it immediately. Use **Create login** to issue a new one later. **Rotate bearer** in the virtual bearer row uses the verified LiteLLM rotation. Update clients and any Citadel credential mappings that used a replaced bearer.
 
 Changes persist in the private rotation journal, including aliases originally loaded from the environment. Keep the journal, permissions file and project database together in private backups.
 

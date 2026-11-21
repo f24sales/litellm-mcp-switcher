@@ -70,6 +70,9 @@ function updateActions() {
     $(action).disabled = busy || !loaded;
     $(action).textContent = kind === 'virtual' ? 'Rotate bearer' : (issued ? 'Rotate login' : 'Create login');
   }
+  const canDeleteLogin = loaded && latest.has_switcher_login;
+  $('delete-login').hidden = !canDeleteLogin;
+  $('delete-login').disabled = busy || !canDeleteLogin;
   $('logout').disabled = busy;
   $('refresh-now').disabled = busy;
   $('save-config').hidden = !identity?.admin;
@@ -331,6 +334,13 @@ $('issue-login').onclick = () => guarded(async () => {
   clearCredentials();
   await api(base() + '/login' + aliasRevision(), {method:'POST'});
   await selectAdminAlias(name); notify('Switcher login issued.');
+});
+$('delete-login').onclick = () => guarded(async () => {
+  const name = $('admin-user').value;
+  if (!confirm(`Delete the Switcher login for ${name}? Its current login bearer will stop working immediately.`)) return;
+  clearCredentials();
+  await api(base() + '/login' + aliasRevision(), {method:'DELETE'});
+  await selectAdminAlias(name); notify('Switcher login deleted.');
 });
 for (const kind of ['virtual', 'switcher']) {
   const eye = $(kind + '-eye'), field = $(kind + '-value');

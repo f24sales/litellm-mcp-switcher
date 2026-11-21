@@ -41,7 +41,12 @@
           </button>
           <button type="button" id="{{ kind }}-copy" aria-label="Copy {{ label }}" disabled>Copy</button>
         </div>
-        <button type="button" class="credential-issue" id="{{ 'rotate' if kind == 'virtual' else 'issue-login' }}" disabled>{{ 'Rotate bearer' if kind == 'virtual' else 'Create login' }}</button>
+        <div class="credential-actions">
+          <button type="button" class="credential-issue" id="{{ 'rotate' if kind == 'virtual' else 'issue-login' }}" disabled>{{ 'Rotate bearer' if kind == 'virtual' else 'Create login' }}</button>
+          {% if kind == 'switcher' %}
+          <button type="button" id="delete-login" class="quiet danger" hidden disabled>Delete login</button>
+          {% endif %}
+        </div>
       </div>
       {% endfor %}
     </div>
