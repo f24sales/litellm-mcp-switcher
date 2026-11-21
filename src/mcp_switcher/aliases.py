@@ -125,10 +125,7 @@ class AliasManager:
                 # Resume a create journaled by a release that preselected the key.
                 await upstream.create_replacement_key(key, parameters)
             else:
-                result = await upstream.request("POST", "/key/generate", json=parameters)
-                key = result.get("key") if isinstance(result, dict) else None
-                if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{24,512}", key):
-                    raise Problem(502, "LiteLLM did not return a usable virtual bearer")
+                key = await upstream.generate_virtual_key(parameters)
                 op["key"] = key
                 self.store.write(data)
             info = await upstream.inspect_key(key)

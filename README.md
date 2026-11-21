@@ -301,13 +301,11 @@ logins cannot list or call it. It always requires an explicit `key_name`, indepe
    email mapping, then run the normal manual Cloudflare API scan. The tool performs neither operation.
 
 The community-compatible implementation uses `/key/generate`, `/key/delete`, and `/key/update`.
-It creates one cryptographically random candidate with the existing MCP grants and rate limits, checks
+LiteLLM generates the replacement bearer with the existing MCP grants and rate limits. The Switcher checks
 the result, revokes the old key and restores its unique LiteLLM alias. A short overlap is possible until
 the old key is deleted. `/key/regenerate` is Enterprise-only and is not used. Rotation supports
 unexpired MCP-only keys with no spend, budgets or automatic rotation; preview rejects other keys
-because replacing their accounting identity could reset history or limits. The candidate is persisted
-before the request. Startup can finish a journaled revocation/alias restoration after a lost response
-without creating another key. The LiteLLM key row changes; historical key IDs are not migrated.
+because replacing their accounting identity could reset history or limits. The Switcher journals the operation before contacting LiteLLM and saves the returned bearer before revoking the old key. If the generation response is lost, recovery removes the unpublished key by its unique temporary alias and leaves the old key active. Retrying the same operation requests a fresh bearer. The LiteLLM key row changes; historical key IDs are not migrated.
 
 `LITELLM_MCP_SWITCHER_ROTATION_CREDENTIALS_FILE` defaults to
 `/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json`. This separate, atomic mode-0600

@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import hashlib
 import json
+import secrets
 import stat
 import uuid
 from dataclasses import replace
@@ -34,13 +36,20 @@ def rotating_api(service, fake, *, timeout=False, reject=False, unavailable=Fals
             if reject:
                 return httpx.Response(403, json={"secret": "never return this"})
             source = next(info for info in fake.keys.values() if info["team_id"] == data["team_id"])
-            fake.keys[data["key"]] = {**copy.deepcopy(source), "key_alias": None}
+            key = data.get("key") or "sk-" + secrets.token_urlsafe(16)
+            fake.keys[key] = {**copy.deepcopy(source), "key_alias": data["key_alias"]}
             if timeout:
                 raise httpx.ReadTimeout("upstream-secret", request=request)
-            return httpx.Response(200, json={"key": data["key"]})
+            return httpx.Response(200, json={"key": key})
+        if request.url.path == "/team/info":
+            team = request.url.params["team_id"]
+            return httpx.Response(200, json={"team_info": fake.teams[team], "keys": [
+                {**v, "token": hashlib.sha256(k.encode()).hexdigest()} for k, v in fake.keys.items()
+                if v["team_id"] == team]})
         if request.url.path == "/key/delete":
             for key in json.loads(request.content)["keys"]:
-                fake.keys.pop(key, None)
+                stored = next((k for k in fake.keys if hashlib.sha256(k.encode()).hexdigest() == key), key)
+                fake.keys.pop(stored, None)
             return httpx.Response(200, json={"ok": True})
         if request.url.path == "/key/update" and "key_alias" in json.loads(request.content):
             data = json.loads(request.content)
@@ -67,6 +76,7 @@ async def test_rotation_preserves_grants_is_idempotent_and_survives_restart(setu
     assert await service.rotation.execute(*args) == result
     assert len(writes) == 1
     new = service.users["alice"].litellm_key
+    assert "key" not in writes[0] and len(new) == 25
     assert old not in fake.keys and new != old
     assert fake.keys[new] == expected and fake.keys[users[2].litellm_key] == untouched
     assert service.target(users[1]).litellm_key == new  # cached login identity uses current key
@@ -84,20 +94,23 @@ async def test_rotation_preserves_grants_is_idempotent_and_survives_restart(setu
 
 
 @pytest.mark.parametrize("timeout,unavailable", [(True, False), (True, True)])
-async def test_lost_response_reconciles_without_second_rotation(setup, timeout, unavailable):
+async def test_lost_generate_response_preserves_old_key_and_retries_safely(setup, timeout, unavailable):
     service, fake, users = setup
     writes = rotating_api(service, fake, timeout=timeout, unavailable=unavailable)
     preview = await service.rotation.execute(users[0], "alice", "preview")
     result = await service.rotation.execute(users[0], "alice", "rotate", preview["revision"], preview["operation_id"])
-    assert result["status"] == ("uncertain" if unavailable else "verified")
-    # Startup uses the durable candidate even when the old configured token is revoked.
+    assert result["status"] == ("uncertain" if unavailable else "retryable")
+    assert users[1].litellm_key in fake.keys
+    # Startup removes only the unpublished key. An explicit retry requests a new one.
     restored = service.rotation.store.overlay(users)
     restarted = Service(service.db, service.upstream, restored, service.settings)
     rotating_api(restarted, fake)
     await restarted.rotation.recover()
     status = await restarted.rotation.execute(users[0], "alice", "status", operation_id=preview["operation_id"])
-    assert status["status"] == "verified" and len(writes) == 1
-    assert restarted.users["alice"].litellm_key in fake.keys
+    assert status["status"] == "retryable" and len(writes) == 1
+    assert set(fake.keys) == {users[1].litellm_key, users[2].litellm_key}
+    retried = await restarted.rotation.execute(users[0], "alice", "rotate", preview["revision"], preview["operation_id"])
+    assert retried["status"] == "verified" and restarted.users["alice"].litellm_key in fake.keys
 
 
 async def test_rejected_write_retries_same_candidate_and_blocks_other_operation(setup):
@@ -110,7 +123,24 @@ async def test_rejected_write_retries_same_candidate_and_blocks_other_operation(
         await service.rotation.execute(users[0], "alice", "rotate", preview["revision"], str(uuid.uuid4()))
     resumed = rotating_api(service, fake)
     assert (await service.rotation.execute(*args))["status"] == "verified"
-    assert writes[0]["key"] == resumed[0]["key"]
+    assert writes[0] == resumed[0] and "key" not in writes[0]
+
+
+async def test_resume_rotation_journaled_before_server_generated_keys(setup):
+    service, fake, users = setup
+    writes = rotating_api(service, fake, reject=True)
+    preview = await service.rotation.execute(users[0], "alice", "preview")
+    args = (users[0], "alice", "rotate", preview["revision"], preview["operation_id"])
+    assert (await service.rotation.execute(*args))["status"] == "retryable"
+    journal = service.rotation.store.read()
+    op = journal["operations"][preview["operation_id"]]
+    op.pop("candidate_alias")
+    op["new_key"] = "sk-" + "a" * 64
+    service.rotation.store.write(journal)
+    resumed = rotating_api(service, fake)
+    assert (await service.rotation.execute(*args))["status"] == "verified"
+    assert len(writes) == len(resumed) == 1
+    assert service.users["alice"].litellm_key == resumed[0]["key"] == op["new_key"]
 
 
 @pytest.mark.parametrize("lost_path", ["/key/delete", "/key/update"])

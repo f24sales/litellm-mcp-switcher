@@ -1,6 +1,7 @@
 """Small LiteLLM management client; never returns upstream secrets."""
 import hashlib
 import json
+import re
 
 import httpx
 
@@ -104,6 +105,13 @@ class LiteLLM:
     async def write_team(self, team, selection):
         await self.request("POST", "/team/update", json={"team_id": team["team_id"],
             "object_permission": merge_permission(team.get("object_permission") or {}, selection)})
+
+    async def generate_virtual_key(self, parameters):
+        result = await self.request("POST", "/key/generate", json=parameters)
+        key = result.get("key") if isinstance(result, dict) else None
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{24,512}", key):
+            raise Problem(502, "LiteLLM did not return a usable virtual bearer")
+        return key
 
     async def create_replacement_key(self, new_key, parameters):
         await self.request("POST", "/key/generate", json={**parameters, "key": new_key})

@@ -3,7 +3,7 @@ import fcntl
 import hashlib
 import json
 import os
-import secrets
+import re
 import stat
 import tempfile
 import uuid
@@ -154,12 +154,42 @@ class Rotation:
             if alias in self.service.users:
                 self.service.users[alias] = replace(self.service.users[alias], litellm_key=record["key"])
 
+    async def discard_unpublished(self, operation):
+        # Only the generate response contains the plaintext. After a lost response
+        # the dedicated team and private per-operation alias identify the orphan.
+        team = operation["parameters"]["team_id"]
+        old_hash = hashlib.sha256(operation["old_key"].encode()).hexdigest()
+        upstream = self.service.upstream
+
+        async def team_keys():
+            result = await upstream.request("GET", "/team/info", params={"team_id": team})
+            keys = result.get("keys")
+            if ((result.get("team_info") or {}).get("team_id") != team or not isinstance(keys, list)
+                    or not all(isinstance(k, dict) and k.get("team_id") == team for k in keys)
+                    or sum(k.get("token") == old_hash for k in keys) != 1):
+                raise Problem(409, "Cannot verify the current key in its dedicated team")
+            return [k for k in keys if k.get("token") != old_hash]
+
+        others = await team_keys()
+        if not others:
+            return
+        if (len(others) != 1 or others[0].get("key_alias") != operation["candidate_alias"]
+                or not re.fullmatch(r"[0-9a-f]{64}", others[0].get("token") or "")):
+            raise Problem(409, "Cannot identify the unpublished rotation key")
+        await upstream.delete_key(others[0]["token"])
+        if await team_keys():
+            raise Problem(502, "Unpublished replacement cleanup is not confirmed")
+
     async def reconcile(self, data, operation):
         """Finish a journaled replacement; never create another key during startup recovery."""
         upstream = self.service.upstream
-        new = await upstream.inspect_key(operation["new_key"])
+        new = await upstream.inspect_key(operation["new_key"]) if operation.get("new_key") else None
         old = await upstream.inspect_key(operation["old_key"])
         if new is not None:
+            if "candidate_alias" in operation and old is not None and (
+                    new.get("team_id") != operation["parameters"]["team_id"]
+                    or new.get("key_alias") != operation["candidate_alias"]):
+                raise Problem(409, "Cannot verify the identity of the replacement key")
             if (grants(new) != operation["grants"] or (old is not None and
                     (grants(old) != operation["grants"] or old.get("key_alias") != operation["key_alias"]))):
                 if old is not None:
@@ -194,12 +224,15 @@ class Rotation:
         else:
             if old is None:
                 raise Problem(502, "Neither rotation credential could be verified; reconcile LiteLLM privately")
+            if "candidate_alias" in operation:
+                await self.discard_unpublished(operation)
+                operation.pop("new_key", None)
             if grants(old) != operation["grants"] or old.get("key_alias") != operation["key_alias"]:
                 operation.update(status="conflict", message="Key grants changed during rotation; review "
                                  "LiteLLM before retrying")
             else:
                 operation.update(status="retryable", message="Old key remains valid. Retry rotate with the "
-                                 "same operation_id and revision to reuse the persisted candidate")
+                                 "same operation_id and revision")
         self.store.write(data)
         self.refresh(data)
 
@@ -256,14 +289,23 @@ class Rotation:
                         raise Problem(409, "Key or grants changed; obtain a fresh rotation preview")
                     operation = {"alias": target.name, "revision": revision, "grants": grants(info),
                                  "key_alias": info.get("key_alias"), "parameters": replacement_parameters(info),
-                                 "old_key": target.litellm_key, "new_key": "sk-" + secrets.token_hex(32),
+                                 "old_key": target.litellm_key, "candidate_alias": "mcp-rotation-" + uuid.uuid4().hex,
                                  "status": "pending", "message": "Rotation journal saved; result pending"}
                     data["operations"][operation_id] = operation
                 # Durable intent precedes the API call, including every retry.
                 operation.update(status="pending", message="Rotation journal saved; result pending")
                 self.store.write(data)
                 try:
-                    await self.service.upstream.create_replacement_key(operation["new_key"], operation["parameters"])
+                    if "candidate_alias" in operation:
+                        parameters = {**operation["parameters"], "key_alias": operation["candidate_alias"]}
+                        key = await self.service.upstream.generate_virtual_key(parameters)
+                        if key == operation["old_key"]:
+                            raise Problem(502, "LiteLLM returned the current key")
+                        operation["new_key"] = key
+                        self.store.write(data)
+                    else:
+                        # Finish an operation begun by a version with a preselected candidate.
+                        await self.service.upstream.create_replacement_key(operation["new_key"], operation["parameters"])
                 except Problem:
                     operation.update(status="uncertain", message="LiteLLM write result is uncertain; retry "
                                      "this operation_id and revision")
