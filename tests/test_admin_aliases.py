@@ -1,5 +1,6 @@
 import hashlib
 import json
+import secrets
 
 import httpx
 from mcp_switcher.config import load_configuration
@@ -27,7 +28,10 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
     (tmp_path / "permissions.json").write_text('{"alice":["docs"], "bob":[]}')
     service.db.save_project("alice", ProjectInput(name="report", selection=Selection()))
 
+    lose_response = True
+
     def upstream(req):
+        nonlocal lose_response
         body = json.loads(req.content) if req.content else {}
         path = req.url.path
         if path == "/key/info" and "key" in req.url.params:
@@ -39,12 +43,20 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
         elif path == "/team/info":
             team = req.url.params["team_id"]
             return httpx.Response(200, json={"team_info": fake.teams[team],
-                                            "keys": [k for k, v in fake.keys.items() if v["team_id"] == team]})
+                                            "keys": [{**v, "token": hashlib.sha256(k.encode()).hexdigest()}
+                                                     for k, v in fake.keys.items() if v["team_id"] == team]})
         elif path == "/key/generate":
-            fake.keys[body["key"]] = body
+            assert "key" not in body
+            key = "sk-" + secrets.token_hex(32)
+            fake.keys[key] = body
+            if lose_response:
+                lose_response = False
+                raise httpx.ReadTimeout("Lost key generation reply")
+            return httpx.Response(200, json={"key": key})
         elif path == "/key/delete":
             for key in body["keys"]:
-                fake.keys.pop(key)
+                stored = next((k for k in fake.keys if hashlib.sha256(k.encode()).hexdigest() == key), key)
+                fake.keys.pop(stored)
         elif path == "/key/update" and "key_alias" in body:
             fake.keys[body["key"]]["key_alias"] = body["key_alias"]
         else:
@@ -69,8 +81,16 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
             assert (await c.post(root + "/alice/credentials/virtual", headers=auth(token))).status_code == 403
             assert (await c.post(root, json={"name": "new"}, headers=auth(token))).status_code == 403
         assert (await c.post(root + "/admin/credentials/virtual")).status_code == 404
+        assert (await c.post(root, json={"name": "client"})).status_code == 502
+        assert "client" not in restarted()
         assert (await c.post(root, json={"name": "client"})).status_code == 200
+        assert sum(v.get("key_alias") == "mcp-switcher-client" for v in fake.keys.values()) == 1
         assert (await c.post(root, json={"name": "client"})).status_code == 409
+        created = restarted()["client"]
+        assert created.litellm_key in fake.keys and not created.bearer
+        assert (await c.post(root + "/client/credentials/switcher")).status_code == 404
+        assert (await c.post(root + "/client/login", params=await rev("client"))).status_code == 200
+        assert restarted()["client"].litellm_key == created.litellm_key
         for kind in ("switcher", "virtual"):
             r = await c.post(root + "/client/credentials/" + kind)
             assert r.status_code == 200 and r.headers["cache-control"] == "no-store"

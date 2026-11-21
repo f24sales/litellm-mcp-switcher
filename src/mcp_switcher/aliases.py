@@ -52,8 +52,7 @@ class AliasManager:
                     if kind in ("create", "rename"):
                         self.validate_name(new if kind == "rename" else name)
                     if kind == "create":
-                        op = {"source": "+" + uuid.uuid4().hex, "team": str(uuid.uuid4()),
-                              "key": "sk-" + secrets.token_hex(32), "login": secrets.token_urlsafe(32)}
+                        op = {"source": "+" + uuid.uuid4().hex, "team": str(uuid.uuid4())}
                     else:
                         target = self.service.target(actor, name)
                         if alias_revision(target) != revision:
@@ -86,9 +85,9 @@ class AliasManager:
                 except Problem:
                     logging.warning("Pending alias %s for %s requires an administrative retry", op["kind"], op["name"])
 
-    async def provision(self, op):
+    async def provision(self, data, op):
         upstream = self.service.upstream
-        key, team, name = op["key"], op["team"], op["name"]
+        key, team, name = op.get("key"), op["team"], op["name"]
         permission = merge_permission({}, Selection())
         marker = {"mcp_switcher_owner": op["source"]}
         try:
@@ -103,22 +102,44 @@ class AliasManager:
         if (info.get("team_id") != team or (info.get("metadata") or {}).get("mcp_switcher_owner") != op["source"]
                 or (info.get("object_permission") or {}).get("mcp_servers") != permission["mcp_servers"]):
             raise Problem(409, "Cannot verify ownership and access of the new dedicated team")
-        info = await upstream.inspect_key(key)
+        parameters = {"team_id": team, "key_alias": "mcp-switcher-" + name,
+                      "models": ["no-default-models"], "allowed_routes": ["mcp_inference_routes", "/key/info"],
+                      "metadata": marker, "object_permission": permission}
+        info = await upstream.inspect_key(key) if key else None
         if info is None:
-            if record.get("keys") != []:
-                raise Problem(409, "The dedicated team already contains another key")
-            await upstream.create_replacement_key(key, {"team_id": team, "key_alias": "mcp-switcher-" + name,
-                "models": ["no-default-models"], "allowed_routes": ["mcp_inference_routes", "/key/info"],
-                "object_permission": permission})
+            keys = record.get("keys")
+            if keys != []:
+                # A lost generate response leaves only a hash in LiteLLM. Recover exclusively
+                # our unpublished key, identified by the operation's unique ownership marker.
+                orphan = keys[0] if isinstance(keys, list) and len(keys) == 1 else None
+                if (key or not isinstance(orphan, dict) or orphan.get("team_id") != team
+                        or orphan.get("key_alias") != parameters["key_alias"]
+                        or (orphan.get("metadata") or {}).get("mcp_switcher_owner") != op["source"]
+                        or not re.fullmatch(r"[0-9a-f]{64}", orphan.get("token") or "")):
+                    raise Problem(409, "The dedicated team already contains another key")
+                await upstream.delete_key(orphan["token"])
+                checked = await upstream.request("GET", "/team/info", params={"team_id": team})
+                if checked.get("keys") != []:
+                    raise Problem(409, "The previous key is still present")
+            if key:
+                # Resume a create journaled by a release that preselected the key.
+                await upstream.create_replacement_key(key, parameters)
+            else:
+                result = await upstream.request("POST", "/key/generate", json=parameters)
+                key = result.get("key") if isinstance(result, dict) else None
+                if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{24,512}", key):
+                    raise Problem(502, "LiteLLM did not return a usable virtual bearer")
+                op["key"] = key
+                self.store.write(data)
             info = await upstream.inspect_key(key)
         if not info or info.get("team_id") != team or info.get("key_alias") != "mcp-switcher-" + name:
             raise Problem(502, "New virtual key could not be verified")
 
-    async def confirm_upstream(self, op):
+    async def confirm_upstream(self, data, op):
         upstream = self.service.upstream
-        kind, key = op["kind"], op["key"]
+        kind, key = op["kind"], op.get("key")
         if kind == "create":
-            await self.provision(op)
+            await self.provision(data, op)
         elif kind == "rename":
             info = await upstream.inspect_key(key)
             if info is None:
@@ -141,7 +162,7 @@ class AliasManager:
         kind, name, source = op["kind"], op["name"], op["source"]
         new = op.get("new")
         if not op.get("confirmed"):
-            await self.confirm_upstream(op)
+            await self.confirm_upstream(data, op)
             op["confirmed"] = True
             self.store.write(data)
         catalog = data.setdefault("catalog", {})
@@ -157,7 +178,7 @@ class AliasManager:
         users = self.service.users
         old = users.get(name)
         if kind == "create":
-            record.update(seed=op["key"], login=op["login"])
+            record.update(seed=op["key"], login=op.get("login", ""))
             target = Identity(name, record["login"], record["seed"], source=source)
             self.service.db.initialize_owners([source])
         elif kind == "delete":

@@ -55,19 +55,21 @@ function clearCredentials() {
   }
 }
 function updateActions() {
-  for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
-  $('target-key').disabled = busy;
-  $('admin-user').disabled = busy;
-  $('rotate').disabled = busy || !identity?.admin || !latest ||
-    latest.target_key !== $('admin-user').value;
+  for (const id of ['select-all', 'clear-all', 'new-project', 'project'])
+    $(id).disabled = busy || !latest;
+  $('target-key').disabled = $('admin-user').disabled = busy;
   const selected = Boolean(identity?.admin && $('admin-user').value);
+  const loaded = selected && latest?.target_key === $('admin-user').value;
   $('create-alias').disabled = busy || !identity?.admin;
-  for (const id of ['rename-alias', 'delete-alias', 'issue-login', 'virtual-eye', 'virtual-copy'])
-    $(id).disabled = busy || !selected;
-  const login = latest?.has_switcher_login;
-  $('switcher-eye').disabled = $('switcher-copy').disabled = busy || !selected || login === false;
-  $('switcher-value').placeholder = login === false ? 'No login yet' : '••••••••••••';
-  $('issue-login').textContent = login === false ? 'Create login' : 'Rotate login';
+  $('rename-alias').disabled = $('delete-alias').disabled = busy || !selected;
+  for (const [kind, issued, action] of [
+    ['virtual', true, 'rotate'], ['switcher', latest?.has_switcher_login, 'issue-login']
+  ]) {
+    $(kind + '-eye').disabled = $(kind + '-copy').disabled = busy || !loaded || !issued;
+    $(kind + '-value').placeholder = loaded ? (issued ? '••••••••••••' : 'Not created') : 'Select an alias';
+    $(action).disabled = busy || !loaded;
+    $(action).textContent = kind === 'virtual' ? 'Rotate bearer' : (issued ? 'Rotate login' : 'Create login');
+  }
   $('logout').disabled = busy;
   $('refresh-now').disabled = busy;
   $('save-config').hidden = !identity?.admin;
@@ -220,7 +222,10 @@ function renderTools(sid, body) {
   if (!entry.tools.length) body.append(node('p', 'Discovery succeeded; this server returned no tools.'));
 }
 async function guarded(fn) { if (busy) return; busy = true; $('servers').inert = true; updateActions(); hideMessage(); try { await fn(); } catch (e) { notify(e.message, true); } finally { busy = false; $('servers').inert = false; updateActions(); } }
-function askName(title, value = '') {
+function askName(title, value = '', alias = false) {
+  document.querySelector('label[for="project-name"]').textContent = alias ? 'Alias name' : 'Project name';
+  $('dialog-submit').textContent = alias ? title : 'Save project';
+  $('project-name').maxLength = alias ? 64 : 100;
   return new Promise(resolve => { const dialog = $('name-dialog'); $('dialog-title').textContent = title; $('project-name').value = value;
     dialog.returnValue = ''; dialog.addEventListener('close', () => resolve(dialog.returnValue === 'save' ? $('project-name').value.trim() : null), {once:true}); dialog.showModal(); });
 }
@@ -250,7 +255,7 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
     $('apply-note').textContent = identity.admin ? 'Changes apply immediately. Save config keeps server grants across restarts.' : 'Applies to every client using your assigned LiteLLM key.';
     if (identity.admin) { const data = await api('/api/admin/users'); aliasRevisions = data.revisions; $('admin-user').replaceChildren(...data.users.map(name => new Option(name, name))); }
     const value = String(identity.refresh_seconds); if (![...$('refresh').options].some(o => o.value === value)) $('refresh').add(new Option(`${value} seconds`, value));
-    $('refresh').value = value; await refresh(true); setTimer();
+    $('refresh').value = value; updateActions(); await refresh(true); setTimer();
   } catch (e) { logout(); notify(e.message, true); }
 })(); };
 $('logout').onclick = logout;
@@ -302,14 +307,14 @@ async function selectAdminAlias(name) {
   if (select.value) await refresh(true);
 }
 $('create-alias').onclick = () => guarded(async () => {
-  const name = prompt('New bearer alias (starts with no MCP grants)')?.trim();
+  const name = await askName('New alias', '', true);
   if (!name) return;
   await api('/api/admin/users', {method:'POST', body:JSON.stringify({name})});
-  await selectAdminAlias(name); notify('Alias created with both bearers.');
+  await selectAdminAlias(name); notify('Alias and LiteLLM virtual bearer created.');
 });
 $('rename-alias').onclick = () => guarded(async () => {
   const old = $('admin-user').value;
-  const name = prompt('Rename bearer alias', old)?.trim();
+  const name = await askName('Rename alias', old, true);
   if (!name || name === old) return;
   await api(base() + '/name' + aliasRevision(), {method:'PUT', body:JSON.stringify({name})});
   await selectAdminAlias(name); notify('Alias renamed.');
@@ -322,7 +327,7 @@ $('delete-alias').onclick = () => guarded(async () => {
 });
 $('issue-login').onclick = () => guarded(async () => {
   const name = $('admin-user').value;
-  if (!confirm(`Issue a personal Switcher login for ${name}? Any previous login bearer will stop working.`)) return;
+  if (latest.has_switcher_login && !confirm(`Rotate the Switcher login for ${name}? The current login will stop working.`)) return;
   clearCredentials();
   await api(base() + '/login' + aliasRevision(), {method:'POST'});
   await selectAdminAlias(name); notify('Switcher login issued.');

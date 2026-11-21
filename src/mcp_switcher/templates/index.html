@@ -20,20 +20,35 @@
 <div id="workspace" hidden>
   <section class="intro"><div><span class="eyebrow" id="workspace-label">YOUR WORKSPACE</span><h1>Make room for focus.</h1><p id="mode-description">Choose your tools. Save a project. Apply when you're ready.</p></div><span id="selection-count" class="count"></span></section>
   <section id="admin-bar" class="panel alias-admin" hidden>
-    <div class="toolbar"><label for="admin-user">Bearer alias</label><select id="admin-user"></select>
+    <div class="alias-selection">
+      <div class="alias-picker">
+        <label for="admin-user">Bearer alias</label>
+        <select id="admin-user"></select>
+      </div>
+      <div class="alias-actions">
+        <button type="button" id="rename-alias" disabled>Rename</button>
+        <button type="button" id="delete-alias" class="quiet danger" disabled>Delete</button>
+      </div>
+    </div>
+    <div class="credential-list">
+      {% for kind, label in [('virtual', 'LiteLLM virtual bearer'), ('switcher', 'Switcher login bearer')] %}
+      <div class="credential-row">
+        <label for="{{ kind }}-value">{{ label }}</label>
+        <div class="credential-field">
+          <input id="{{ kind }}-value" type="text" readonly autocomplete="off" spellcheck="false" placeholder="Select an alias">
+          <button type="button" id="{{ kind }}-eye" aria-label="Show {{ label }}" aria-pressed="false" title="Show {{ label }}" disabled>
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="eye-slash" d="m3 3 18 18"/></svg>
+          </button>
+          <button type="button" id="{{ kind }}-copy" aria-label="Copy {{ label }}" disabled>Copy</button>
+        </div>
+        <button type="button" class="credential-issue" id="{{ 'rotate' if kind == 'virtual' else 'issue-login' }}" disabled>{{ 'Rotate bearer' if kind == 'virtual' else 'Create login' }}</button>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="alias-create">
       <button type="button" id="create-alias">New alias</button>
-      <button type="button" id="rename-alias" disabled>Rename</button>
-      <button type="button" id="delete-alias" class="danger" disabled>Delete</button>
+      <p>LiteLLM creates the virtual bearer. The Switcher login is optional.</p>
     </div>
-    {% for kind, label in [('virtual', 'LiteLLM virtual bearer'), ('switcher', 'Switcher login bearer')] %}
-    <div class="credential-row">
-      <label for="{{ kind }}-value">{{ label }}</label>
-      <input id="{{ kind }}-value" type="text" readonly autocomplete="off" spellcheck="false" placeholder="••••••••••••">
-      <button type="button" id="{{ kind }}-eye" aria-label="Show {{ label }}" aria-pressed="false" title="Show {{ label }}" disabled>👁</button>
-      <button type="button" id="{{ kind }}-copy" aria-label="Copy {{ label }}" disabled>Copy</button>
-      <button type="button" id="{{ 'rotate' if kind == 'virtual' else 'issue-login' }}" disabled>Rotate</button>
-    </div>
-    {% endfor %}
   </section>
   <section id="target-bar" class="panel toolbar" hidden><label for="target-key">Managed LiteLLM key</label><select id="target-key"></select><span class="small">Selections and projects belong to this key.</span></section>
   <section id="project-bar" class="panel toolbar"><label for="project">Project</label><select id="project"><option value="">Current LiteLLM selection</option></select><button id="new-project">New</button><button id="save-project">Save</button><button id="rename-project">Rename</button><button id="delete-project" class="quiet danger">Delete</button></section>
@@ -48,6 +63,6 @@
 <div id="message" role="alert" hidden></div>
 </main>
 <footer class="page-footer"><span>LiteLLM MCP Switcher</span><span>One key. A considered toolkit.</span></footer>
-<dialog id="name-dialog"><form method="dialog"><h2 id="dialog-title">Name your project</h2><label for="project-name">Project name</label><input id="project-name" maxlength="100" required><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save project</button></div></form></dialog>
+<dialog id="name-dialog"><form method="dialog"><h2 id="dialog-title">Name your project</h2><label for="project-name">Project name</label><input id="project-name" maxlength="100" required><div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="dialog-submit" value="save" class="primary">Save project</button></div></form></dialog>
 </body>
 </html>

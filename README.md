@@ -279,9 +279,9 @@ Tool listings and calls enforce roles, including calls using cached tool names. 
 
 ### Managing bearer aliases in the Admin Web UI
 
-Select **New alias** to create a dedicated MCP-only LiteLLM key with empty grants and a personal Switcher login. **Rename** preserves both credentials, projects and orchestrator assignments. **Delete** confirms the selected alias, revokes its virtual key and login, removes assignments and deletes that alias’s projects. New aliases can be managed by the administrator and their personal login.
+Select **New alias** to have LiteLLM generate the mandatory virtual bearer with empty MCP grants. Use **Create login** separately if a personal Switcher login is needed for Citadel and Cloudflare. **Rename** preserves both credentials, projects and orchestrator assignments. **Delete** confirms the selected alias, revokes its virtual key and login, removes assignments and deletes that alias’s projects. New aliases can be managed by the administrator and their personal login.
 
-Each credential has a masked field, an eye button and a copy button. Only an authenticated administrator can request a single credential. **Create login** issues a personal login for an existing alias. **Rotate login** invalidates the previous Switcher login. **Rotate** in the virtual bearer row uses the existing verified LiteLLM rotation. Update clients and any Citadel credential mappings that used a replaced bearer.
+Each credential has a masked field, an eye button and a copy button. Only an authenticated administrator can request a single credential. **Rotate login** invalidates the previous Switcher login. **Rotate bearer** in the virtual bearer row uses the verified LiteLLM rotation. Update clients and any Citadel credential mappings that used a replaced bearer.
 
 Changes persist in the private rotation journal, including aliases originally loaded from the environment. Keep the journal, permissions file and project database together in private backups.
 

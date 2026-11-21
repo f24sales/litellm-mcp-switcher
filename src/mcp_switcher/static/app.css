@@ -8,9 +8,60 @@ input.active-switch:checked{background:#1975d1;border-color:#1262b2}
 input.active-switch:disabled{background:#ccd2d8;cursor:default}
 input.active-switch:disabled:checked{background:#768797;border-color:#687786}
 
-.alias-admin { display: grid; gap: .75rem; padding: 1rem; }
-.alias-admin .toolbar { margin: 0; padding: 0; }
-.credential-row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
-.credential-row label { min-width: 10rem; }
-.credential-row input { flex: 1 1 12rem; min-width: 0; font-family: monospace; }
-.alias-admin[hidden] { display: none; }
+
+.alias-admin {
+  --panel-pad: clamp(1rem, 3vw, 2rem);
+  padding: 0;
+  overflow: hidden;
+}
+.alias-selection, .alias-create {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  padding: 1.5rem var(--panel-pad);
+}
+.alias-picker { display: grid; flex: 1 1 15rem; gap: .6rem; min-width: 0; }
+.alias-picker select { width: 100%; }
+.alias-picker label, .credential-row label { font-weight: 650; color: var(--text); }
+.alias-actions, .dialog-actions { display: flex; flex-wrap: wrap; gap: .85rem; }
+.alias-actions .danger { color: #964338; }
+.credential-list {
+  display: grid;
+  gap: 1.5rem;
+  margin: 0 var(--panel-pad);
+  padding: 1.5rem 0 1.75rem;
+  border-top: 1px solid var(--line);
+}
+.credential-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, auto);
+  gap: .6rem 1.5rem;
+}
+.credential-row label { grid-column: 1 / -1; }
+.credential-field {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.credential-field input { width: 0; flex: 1; border: 0; background: transparent; font-family: ui-monospace, monospace; }
+.credential-field button { min-height: 40px; border: 0; background: transparent; color: var(--muted); }
+.credential-field button:hover:enabled, .credential-field button[aria-pressed="true"] { color: var(--accent); background: #e8f1fa; }
+.credential-field svg { display: block; }
+.eye-slash { display: none; }
+[aria-pressed="true"] .eye-slash { display: inline; }
+.alias-create { align-items: center; background: var(--bg); border-top: 1px solid var(--line); gap: .75rem 1.25rem; }
+.alias-create button { color: var(--accent); font-weight: 600; }
+.alias-create p { margin: 0; font-size: 13px; }
+.toolbar, .controls, .actionbar > div:last-child { gap: .85rem; flex-wrap: wrap; }
+@media (max-width: 700px) {
+  .alias-selection { align-items: start; }
+  .alias-picker { flex-basis: 100%; }
+  .credential-row { grid-template-columns: minmax(0, 1fr); gap: .65rem; }
+  .credential-issue { justify-self: start; }
+  .alias-create { align-items: start; flex-direction: column; }
+}
