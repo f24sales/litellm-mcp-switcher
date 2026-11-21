@@ -10,6 +10,11 @@
 <body>
 <header class="topbar"><a class="brand" href="/" aria-label="Switcher home"><span class="mark">≋</span><span>MCP <strong>Switcher</strong></span></a><span class="tag">Powered for LiteLLM</span><div id="identity" hidden><span id="who"></span><button id="logout" class="quiet">Sign out</button></div></header>
 <main>
+<section id="access-notice" class="notice" aria-label="Domain sign-in" hidden>
+  <p role="status">Your domain sign-in needs renewing. Sign in in a new tab, then return here.</p>
+  <div class="alias-actions"><a href="/static/domain-sign-in.html" target="_blank" rel="noopener noreferrer">Sign in to the domain ↗</a>
+    <button id="resume-access" type="button" class="quiet">Retry connection</button></div>
+</section>
 <section id="login" class="login panel">
   <span class="eyebrow">YOUR TOOLS, YOUR WORKFLOW</span>
   <h1>A little less noise.<br><span>The right tools.</span></h1>

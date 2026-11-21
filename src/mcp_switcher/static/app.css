@@ -81,3 +81,7 @@ input.active-switch:disabled:checked{background:#768797;border-color:#687786}
   border-color: transparent;
   font-size: 1.25rem;
 }
+
+#access-notice p { margin: 0 0 .75rem; color: inherit; }
+#access-notice .alias-actions { align-items: center; }
+#access-notice a { color: #0e579e; text-decoration: underline; }

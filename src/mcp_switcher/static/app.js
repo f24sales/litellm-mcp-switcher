@@ -6,15 +6,22 @@ const aliasRevision = () => "?revision=" + encodeURIComponent(aliasRevisions[$("
 let token = '', identity, latest, projectId = '', timer, busy = false, refreshId = 0;
 const catalog = new Map();
 const expanded = new Set();
+const domainLoginMessage = 'Sign in to this domain to continue.';
+let resumingAccess = false;
 const clone = value => structuredClone(value);
-function notify(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); $('message').hidden = false; }
+function notify(text, error = false) { if (text === domainLoginMessage) return; $('message').textContent = text; $('message').classList.toggle('error', error); $('message').hidden = false; }
 function hideMessage() { $('message').hidden = true; }
 function node(tag, text, cls) { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; }
 async function api(path, options = {}) {
   if (identity?.orchestrator && path.startsWith('/api/') && path !== '/api/me' && !path.includes('key_name=')) {
     path += `${path.includes('?') ? '&' : '?'}key_name=${encodeURIComponent($('target-key').value)}`;
   }
-  const response = await fetch(path, { ...options, headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {})}, cache: 'no-store' });
+  const response = await fetch(path, { ...options, headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {})}, cache: 'no-store', redirect: 'manual' });
+  if (response.type === 'opaqueredirect' || response.headers.get('cf-mitigated') === 'challenge') {
+    hideMessage();
+    $('access-notice').hidden = false;
+    throw new Error(domainLoginMessage);
+  }
   const data = await response.json().catch(() => null);
   if (response.ok && data === null) throw new Error('Switcher returned an unreadable response. Refresh to retry.');
   if (!response.ok) {
@@ -122,7 +129,11 @@ async function refresh(force = false) {
     $('operation').hidden = !['pending', 'uncertain', 'conflict'].includes(state.operation.status);
     $('operation').textContent = state.operation.message || '';
     if (state.catalog_refreshing) pollCatalog();
-  } catch (e) { $('sync-state').textContent = 'Refresh failed · your selection is preserved'; notify(e.message, true); }
+  } catch (e) {
+    if (id !== refreshId || !identity || path !== statePath()) return;
+    $('sync-state').textContent = e.message === domainLoginMessage ? 'Waiting for domain sign-in' : 'Refresh failed · your selection is preserved';
+    notify(e.message, true);
+  }
 }
 function renderCards() {
   if (!latest) return;
@@ -263,11 +274,15 @@ async function saveProject(rename = false, create = false) {
   projectId = result.id;
   await refresh(); notify('Project saved. Use Apply to activate this selection.');
 }
-function setTimer() { clearInterval(timer); const seconds = Number($('refresh').value); if (seconds) timer = setInterval(() => { if (!busy && !document.hidden) refresh(); }, seconds * 1000); }
-function logout() { clearCredentials(); clearInterval(timer); token = ''; identity = null; latest = null; refreshId++; catalog.clear(); expanded.clear(); projectId = ''; draft.dirty = false; draft.epoch++; $('workspace').hidden = true; $('identity').hidden = true; $('login').hidden = false; $('bearer').value = ''; }
-$('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer').value.trim(); $('bearer').value = ''; (async () => {
+function setTimer() { clearInterval(timer); const seconds = Number($('refresh').value); if (seconds) timer = setInterval(() => { if (!busy && !document.hidden && $('access-notice').hidden) refresh(); }, seconds * 1000); }
+function logout() { $('access-notice').hidden = true; clearCredentials(); clearInterval(timer); token = ''; identity = null; latest = null; refreshId++; catalog.clear(); expanded.clear(); projectId = ''; draft.dirty = false; draft.epoch++; $('workspace').hidden = true; $('identity').hidden = true; $('login').hidden = false; $('bearer').value = ''; }
+$('login-form').onsubmit = event => {
+  event.preventDefault(); token = $('bearer').value.trim(); $('bearer').value = '';
+  openWorkspace();
+};
+async function openWorkspace() {
   try {
-    identity = await api('/api/me'); hideMessage(); $('who').textContent = identity.name; $('identity').hidden = false;
+    identity = await api('/api/me'); $('access-notice').hidden = true; hideMessage(); $('who').textContent = identity.name; $('identity').hidden = false;
     $('login').hidden = true; $('workspace').hidden = false;
     $('target-bar').hidden = !identity.orchestrator;
     if (identity.orchestrator) $('target-key').replaceChildren(...identity.key_names.map(name => new Option(name, name)));
@@ -279,8 +294,26 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
     if (identity.admin) { const data = await api('/api/admin/users'); aliasRevisions = data.revisions; $('admin-user').replaceChildren(...data.users.map(name => new Option(name, name))); }
     const value = String(identity.refresh_seconds); if (![...$('refresh').options].some(o => o.value === value)) $('refresh').add(new Option(`${value} seconds`, value));
     $('refresh').value = value; updateActions(); await refresh(true); setTimer();
-  } catch (e) { logout(); notify(e.message, true); }
-})(); };
+  } catch (e) {
+    if (e.message === domainLoginMessage) {
+      identity = null; $('workspace').hidden = $('identity').hidden = true; $('login').hidden = false;
+    } else { logout(); notify(e.message, true); }
+  }
+}
+async function resumeAccess() {
+  if ($('access-notice').hidden || !token || resumingAccess || busy) return;
+  resumingAccess = true;
+  try {
+    if (!identity) { await openWorkspace(); return; }
+    await api('/api/me');
+    $('access-notice').hidden = true;
+    hideMessage();
+    await refresh();
+  } catch (e) { notify(e.message, true); }
+  finally { resumingAccess = false; }
+}
+$('resume-access').onclick = resumeAccess;
+window.addEventListener('focus', resumeAccess);
 $('logout').onclick = logout;
 $('target-key').onchange = () => {
   if (busy || (draft.dirty && !confirm('Discard this key’s unsaved selection and change target?'))) {
@@ -301,7 +334,7 @@ let catalogTimer;
 function pollCatalog() {
   clearTimeout(catalogTimer);
   catalogTimer = setTimeout(async () => {
-    if (identity && latest?.catalog_refreshing) await refresh();
+    if (identity && latest?.catalog_refreshing && $('access-notice').hidden) await refresh();
   }, 2500);
 }
 $('select-all').onclick = () => { for (const server of latest.servers) if (identity.admin || Object.hasOwn(latest.ceiling.servers, server.server_id)) draft.selection.servers[server.server_id] = null; selectionChanged(); };
