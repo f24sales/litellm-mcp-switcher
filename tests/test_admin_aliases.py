@@ -1,0 +1,101 @@
+import hashlib
+import json
+
+import httpx
+from mcp_switcher.config import load_configuration
+from mcp_switcher.models import ProjectInput, Selection
+from mcp_switcher.web import create_web
+
+
+async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
+    service, fake, identities = setup
+    admin, alice, bob = identities
+    from mcp_switcher.config import Identity
+    op = Identity("operator", "operator-" + "s" * 32, key_names=("alice", "bob"))
+    identities.append(op)
+    prefix = "LITELLM_MCP_SWITCHER_"
+    settings = {
+        "ADMIN_VIRTUAL_KEY": admin.bearer, "BEARER_ALIAS": alice.name, "KEY_BEARER": alice.litellm_key,
+        "KEY_SWITCHER_BEARER": alice.bearer, "BEARER_ALIAS_02": bob.name, "KEY_BEARER_02": bob.litellm_key,
+        "KEY_SWITCHER_BEARER_02": bob.bearer, "ORCHESTRATOR_NAME": op.name, "ORCHESTRATOR_BEARER": op.bearer,
+        "ORCHESTRATOR_BEARER_ALIASES": "alice,bob", "PERMISSIONS_FILE": str(tmp_path / "permissions.json"),
+        "ROTATION_CREDENTIALS_FILE": service.settings.rotation_credentials_file,
+    }
+    for k, v in settings.items():
+        monkeypatch.setenv(prefix + k, v)
+    service.settings.permissions_file = settings["PERMISSIONS_FILE"]
+    (tmp_path / "permissions.json").write_text('{"alice":["docs"], "bob":[]}')
+    service.db.save_project("alice", ProjectInput(name="report", selection=Selection()))
+
+    def upstream(req):
+        body = json.loads(req.content) if req.content else {}
+        path = req.url.path
+        if path == "/key/info" and "key" in req.url.params:
+            info = next((v for k, v in fake.keys.items() if hashlib.sha256(k.encode()).hexdigest()
+                         == req.url.params["key"]), None)
+            return httpx.Response(200, json={"info": info}) if info else httpx.Response(404)
+        if path == "/team/new":
+            fake.teams[body["team_id"]] = body
+        elif path == "/team/info":
+            team = req.url.params["team_id"]
+            return httpx.Response(200, json={"team_info": fake.teams[team],
+                                            "keys": [k for k, v in fake.keys.items() if v["team_id"] == team]})
+        elif path == "/key/generate":
+            fake.keys[body["key"]] = body
+        elif path == "/key/delete":
+            for key in body["keys"]:
+                fake.keys.pop(key)
+        elif path == "/key/update" and "key_alias" in body:
+            fake.keys[body["key"]]["key_alias"] = body["key_alias"]
+        else:
+            return fake.response(req)
+        return httpx.Response(200, json={})
+
+    service.upstream.client._transport = httpx.MockTransport(upstream)
+    root = "/api/admin/users"
+
+    def auth(key):
+        return {"Authorization": "Bearer " + key}
+
+    def restarted():
+        return {u.name: u for u in load_configuration()[1]}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_web(service, identities)),
+                                 base_url="http://test", headers=auth(admin.bearer)) as c:
+        async def rev(name):
+            return {"revision": (await c.get(root)).json()["revisions"][name]}
+
+        for token in (bob.bearer, op.bearer):
+            assert (await c.post(root + "/alice/credentials/virtual", headers=auth(token))).status_code == 403
+            assert (await c.post(root, json={"name": "new"}, headers=auth(token))).status_code == 403
+        assert (await c.post(root + "/admin/credentials/virtual")).status_code == 404
+        assert (await c.post(root, json={"name": "client"})).status_code == 200
+        assert (await c.post(root, json={"name": "client"})).status_code == 409
+        for kind in ("switcher", "virtual"):
+            r = await c.post(root + "/client/credentials/" + kind)
+            assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+            value = r.json()["value"]
+            assert value not in (await c.get(root)).text
+            if kind == "virtual":
+                assert fake.keys[value]["object_permission"]["mcp_servers"] == ["no-mcp-servers"]
+        assert restarted()["client"] == service.users["client"]
+        assert (await c.put(root + "/alice/name", params=await rev("alice"), json={"name": "renamed"})).status_code == 200
+        assert restarted()["operator"].key_names == ("renamed", "bob")
+        assert restarted()["renamed"].owner == "alice"
+        assert (await c.get(root + "/renamed")).json()["projects"][0]["name"] == "report"
+        assert (await c.get("/api/me", headers=auth(alice.bearer))).json()["name"] == "renamed"
+        old_rev = await rev("renamed")
+        assert (await c.post(root + "/renamed/login", params=old_rev)).status_code == 200
+        assert (await c.post(root + "/renamed/login", params=old_rev)).status_code == 409
+        assert (await c.get("/api/me", headers=auth(alice.bearer))).status_code == 401
+        new_login = (await c.post(root + "/renamed/credentials/switcher")).json()["value"]
+        assert restarted()["renamed"].bearer == new_login
+        assert (await c.delete(root + "/renamed", params=await rev("renamed"))).status_code == 200
+        assert alice.litellm_key not in fake.keys and bob.litellm_key in fake.keys
+        assert (await c.get("/api/me", headers=auth(new_login))).status_code == 401
+        assert "renamed" not in restarted() and "alice" not in restarted()
+        assert restarted()["operator"].key_names == ("bob",)
+        assert not service.db.list_projects("alice")
+        assert (await c.post(root, json={"name": "alice"})).status_code == 200
+        assert restarted()["alice"].owner != "alice"
+        assert restarted()["operator"].key_names == ("bob",)

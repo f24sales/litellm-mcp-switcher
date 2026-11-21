@@ -28,11 +28,14 @@ def ceiling_aliases(servers, allowed):
 class Service:
     def __init__(self, db, upstream, users, settings):
         self.db, self.upstream, self.settings = db, upstream, settings
+        self.identities = users
         self.users = {u.name: u for u in users if u.litellm_key and not u.admin}
         self.discovery_limit = asyncio.Semaphore(3)
         self.discovery = {}
         self.key_locks = {name: asyncio.Lock() for name in self.users}
         self.rotation = Rotation(self)
+        from .aliases import AliasManager
+        self.aliases = AliasManager(self)
 
     def target(self, actor, name=None):
         if actor.admin:
@@ -46,7 +49,7 @@ class Service:
             return self.users[name]
         if name is not None and name != actor.name:
             raise Problem(403, "This identity cannot manage another user")
-        if actor.name not in self.users:
+        if actor.name not in self.users or self.users[actor.name].owner != actor.owner:
             raise Problem(403, "This identity has no configured managed key")
         return replace(actor, litellm_key=self.users[actor.name].litellm_key)
 
@@ -74,7 +77,7 @@ class Service:
         return selection.model_copy(update={"servers": {**selection.servers, **self.always_on(target, inventory)}})
 
     async def reconcile(self, target, info, ceiling, active):
-        operation = self.db.operation(target.name)
+        operation = self.db.operation(target.owner)
         if operation["status"] not in {"pending", "uncertain"}:
             return operation
         if operation["status"] == "pending" and operation["expires"] > time.time():
@@ -83,10 +86,10 @@ class Service:
         observed = ({"ceiling": ceiling.model_dump(), "active": info["_switcher_raw_active"]}
                     if operation["kind"] == "ceiling" else info["_switcher_raw_active"])
         if observed == expected:
-            self.db.finish(target.name, operation["id"], "verified", "Upstream result verified by reconciliation")
+            self.db.finish(target.owner, operation["id"], "verified", "Upstream result verified by reconciliation")
         else:
-            self.db.finish(target.name, operation["id"], "conflict", "Upstream state differs; review before applying")
-        return self.db.operation(target.name)
+            self.db.finish(target.owner, operation["id"], "conflict", "Upstream state differs; review before applying")
+        return self.db.operation(target.owner)
 
     async def state(self, actor, name=None, *, show_catalog=False):
         target, inventory, info, _, ceiling, active = await self.snapshot(actor, name)
@@ -97,11 +100,12 @@ class Service:
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
                 "always_on_mcps": list(self.always_on(target, inventory)),
                 "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps, target.name),
-                "projects": self.db.list_projects(target.name),
+                "projects": self.db.list_projects(target.owner),
                 "operation": {k: operation[k] for k in ("id", "kind", "status", "message")},
                 "refresh_seconds": self.settings.webui_refresh_seconds}
 
         if actor.admin:
+            state["has_switcher_login"] = bool(target.bearer)
             try:
                 saved = read(self.settings.permissions_file)[target.name]
                 state["config_changed"] = ceiling_aliases(inventory, ceiling.servers) != sorted(saved)
@@ -161,13 +165,13 @@ class Service:
         target, inventory, _, _, ceiling, _ = await self.snapshot(actor)
         data = data.model_copy(update={"selection": self.protect(target, inventory, data.selection)})
         await self.validate(actor, data.selection, ceiling, inventory)
-        return {**self.db.save_project(target.name, data, project_id), "target_key": target.name}
+        return {**self.db.save_project(target.owner, data, project_id), "target_key": target.name}
 
     def delete_project(self, actor, project_id, version):
         if actor.admin:
             raise Problem(403, "Use a user identity to manage projects")
         target = self.target(actor)
-        self.db.delete_project(target.name, project_id, version)
+        self.db.delete_project(target.owner, project_id, version)
         return {"deleted": True, "target_key": target.name}
 
     async def apply(self, actor, data, name=None, ceiling_change=False):
@@ -230,12 +234,12 @@ class Service:
         desired = ({"ceiling": selected.model_dump(), "active": desired_active.model_dump()}
                    if ceiling_change else desired_active.model_dump())
         kind = "ceiling" if ceiling_change else "active"
-        with self.db.lease(target.name, kind, desired,
+        with self.db.lease(target.owner, kind, desired,
                            timeout=self.settings.litellm_request_timeout_seconds * 12 + 60) as operation_id:
             # Re-read after acquiring the cross-request lease.
             _, _, fresh_info, fresh_team, upper, current = await self.snapshot(actor, name)
             if revision(upper, current, fresh_info["_switcher_raw_active"], target.always_on_mcps, target.name) != data.revision:
-                self.db.finish(target.name, operation_id, "conflict", "Access changed before the update")
+                self.db.finish(target.owner, operation_id, "conflict", "Access changed before the update")
                 raise Problem(409, "Access changed before the update")
             if ceiling_change:
                 # Team is authoritative immediately, including during a partial failure.
@@ -248,5 +252,5 @@ class Service:
                         if ceiling_change else verified_info["_switcher_raw_active"])
             if observed != desired:
                 raise Problem(502, "LiteLLM did not confirm the requested permissions; reconcile before retrying")
-            self.db.finish(target.name, operation_id, "verified", "Permissions verified in LiteLLM")
+            self.db.finish(target.owner, operation_id, "verified", "Permissions verified in LiteLLM")
         return await self.state(actor, name)

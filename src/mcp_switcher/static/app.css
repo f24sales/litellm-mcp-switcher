@@ -7,3 +7,10 @@ input.active-switch:checked{background:#1975d1;border-color:#1262b2}
 .active-switch:checked::after{left:16px}
 input.active-switch:disabled{background:#ccd2d8;cursor:default}
 input.active-switch:disabled:checked{background:#768797;border-color:#687786}
+
+.alias-admin { display: grid; gap: .75rem; padding: 1rem; }
+.alias-admin .toolbar { margin: 0; padding: 0; }
+.credential-row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
+.credential-row label { min-width: 10rem; }
+.credential-row input { flex: 1 1 12rem; min-width: 0; font-family: monospace; }
+.alias-admin[hidden] { display: none; }

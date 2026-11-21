@@ -25,6 +25,12 @@ class Identity:
     key_names: tuple[str, ...] = ()
     allowed_mcps: tuple[str, ...] = ()
 
+    source: str = ""
+
+    @property
+    def owner(self):
+        return self.source or self.name
+
     @property
     def orchestrator(self):
         return bool(self.key_names)
@@ -119,35 +125,55 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
 
     targets = []
     permissions = read_permissions(settings.permissions_file)
-    for group in groups("KEY"):
+    from .rotation import CredentialStore
+    store = CredentialStore(settings.rotation_credentials_file)
+    journal = store.read()
+    catalog = journal.get("catalog", {})
+    changes = journal.get("alias_changes", {})
+    key_groups = list(groups("KEY"))
+    original_names = {g["NAME"] for g in key_groups if g["NAME"]}
+    for source, record in catalog.items():
+        if source.startswith("+") and record.get("name"):
+            key_groups.append({"NAME": source, "BEARER": record["seed"], "SWITCHER_BEARER": "",
+                               "ALWAYS_ON_MCPS": ""})
+    for group in key_groups:
         if not any(group.values()):
+            continue
+        source = group["NAME"]
+        record = catalog.get(source, {})
+        name = record.get("name", source)
+        if name is None:
             continue
         key = group["BEARER"]
         if len(key) < 24 or key in keys:
             raise ValueError("Each managed key requires a complete, unique LiteLLM bearer")
         keys.add(key)
-        if group["NAME"] not in permissions:
+        saved = permissions.get(name)
+        pending = changes.get(name, {})
+        if saved is None and pending.get("source") == source and pending.get("confirmed"):
+            saved = permissions.get(pending.get("new"), pending.get("allowed", []))
+        if saved is None:
             raise ValueError("Missing permissions.json entry for configured alias")
-        identity = Identity(group["NAME"], group["SWITCHER_BEARER"], key,
+        identity = Identity(name, record.get("login", group["SWITCHER_BEARER"]), key,
                             always_on_mcps=csv_names(group["ALWAYS_ON_MCPS"], "Always-on aliases"),
-                            allowed_mcps=tuple(permissions[group["NAME"]]))
+                            allowed_mcps=tuple(saved), source=source if source != name else "")
         if not set(identity.always_on_mcps) <= set(identity.allowed_mcps):
             raise ValueError("Always-on aliases must be included in the allowed MCP aliases")
         add(identity)
         targets.append(identity.name)
-    if not targets:
+    if not targets and not catalog:
         raise ValueError("Configure at least one managed LiteLLM key")
     for group in groups("ORCHESTRATOR"):
         if not any(group.values()):
             continue
         allowed = csv_names(group["KEY_NAMES"], "Orchestrator bearer aliases")
-        if not allowed or not set(allowed) <= set(targets) or len(group["BEARER"]) < 24:
+        if not allowed or not set(allowed) <= (original_names | set(targets)) or len(group["BEARER"]) < 24:
             raise ValueError("An orchestrator requires a bearer and existing managed bearer aliases")
+        allowed = tuple(name for source in allowed if (name := catalog.get(source, {}).get("name", source)))
         add(Identity(group["NAME"], group["BEARER"], key_names=allowed))
     if keys & tokens:
         raise ValueError("Switcher and LiteLLM bearer namespaces must be separate")
-    from .rotation import CredentialStore
-    identities = CredentialStore(settings.rotation_credentials_file).overlay(identities)
+    identities = store.overlay(identities)
     effective_keys = [u.litellm_key for u in identities if u.litellm_key]
     if len(set(effective_keys)) != len(effective_keys) or set(effective_keys) & tokens:
         raise ValueError("Rotated keys must remain unique and separate from Switcher logins")
@@ -157,4 +183,4 @@ def load_configuration() -> tuple[Settings, list[Identity]]:
 def authenticate(token: str, identities: list[Identity]) -> Identity | None:
     if not token or len(token) > 4096:
         return None
-    return next((u for u in identities if u.bearer and hmac.compare_digest(u.bearer, token)), None)
+    return next((u for u in identities if (u.admin or u.orchestrator or u.litellm_key) and u.bearer and hmac.compare_digest(u.bearer, token)), None)

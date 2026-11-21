@@ -1,6 +1,8 @@
 import { Draft, preserveAlwaysOn } from './state.js';
 const $ = id => document.getElementById(id);
 const draft = new Draft();
+let aliasRevisions = {};
+const aliasRevision = () => "?revision=" + encodeURIComponent(aliasRevisions[$("admin-user").value] || "");
 let token = '', identity, latest, projectId = '', timer, busy = false, refreshId = 0;
 const catalog = new Map();
 const expanded = new Set();
@@ -43,12 +45,29 @@ function selectionChanged() {
   draft.edit(draft.selection);
   updateActions(); renderCards();
 }
+function clearCredentials() {
+  for (const kind of ['virtual', 'switcher']) {
+    $(kind + '-value').value = '';
+    const eye = $(kind + '-eye');
+    eye.setAttribute('aria-pressed', 'false');
+    eye.title = eye.getAttribute('aria-label').replace(/^Hide /, 'Show ');
+    eye.setAttribute('aria-label', eye.title);
+  }
+}
 function updateActions() {
   for (const id of ['select-all', 'clear-all', 'new-project', 'project']) $(id).disabled = busy || !latest;
   $('target-key').disabled = busy;
   $('admin-user').disabled = busy;
   $('rotate').disabled = busy || !identity?.admin || !latest ||
     latest.target_key !== $('admin-user').value;
+  const selected = Boolean(identity?.admin && $('admin-user').value);
+  $('create-alias').disabled = busy || !identity?.admin;
+  for (const id of ['rename-alias', 'delete-alias', 'issue-login', 'virtual-eye', 'virtual-copy'])
+    $(id).disabled = busy || !selected;
+  const login = latest?.has_switcher_login;
+  $('switcher-eye').disabled = $('switcher-copy').disabled = busy || !selected || login === false;
+  $('switcher-value').placeholder = login === false ? 'No login yet' : '••••••••••••';
+  $('issue-login').textContent = login === false ? 'Create login' : 'Rotate login';
   $('logout').disabled = busy;
   $('refresh-now').disabled = busy;
   $('save-config').hidden = !identity?.admin;
@@ -217,7 +236,7 @@ async function saveProject(rename = false, create = false) {
   await refresh(); notify('Project saved. Use Apply to activate this selection.');
 }
 function setTimer() { clearInterval(timer); const seconds = Number($('refresh').value); if (seconds) timer = setInterval(() => { if (!busy && !document.hidden) refresh(); }, seconds * 1000); }
-function logout() { clearInterval(timer); token = ''; identity = null; latest = null; refreshId++; catalog.clear(); expanded.clear(); projectId = ''; draft.dirty = false; draft.epoch++; $('workspace').hidden = true; $('identity').hidden = true; $('login').hidden = false; $('bearer').value = ''; }
+function logout() { clearCredentials(); clearInterval(timer); token = ''; identity = null; latest = null; refreshId++; catalog.clear(); expanded.clear(); projectId = ''; draft.dirty = false; draft.epoch++; $('workspace').hidden = true; $('identity').hidden = true; $('login').hidden = false; $('bearer').value = ''; }
 $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer').value.trim(); $('bearer').value = ''; (async () => {
   try {
     identity = await api('/api/me'); hideMessage(); $('who').textContent = identity.name; $('identity').hidden = false;
@@ -229,7 +248,7 @@ $('login-form').onsubmit = event => { event.preventDefault(); token = $('bearer'
     $('mode-description').textContent = identity.admin ? 'Define the MCP servers and tools each user may choose from.' : 'Choose your tools. Save a project. Apply when you\'re ready.';
     $('apply').hidden = $('discard').hidden = identity.admin;
     $('apply-note').textContent = identity.admin ? 'Changes apply immediately. Save config keeps server grants across restarts.' : 'Applies to every client using your assigned LiteLLM key.';
-    if (identity.admin) { const data = await api('/api/admin/users'); $('admin-user').replaceChildren(...data.users.map(name => new Option(name, name))); }
+    if (identity.admin) { const data = await api('/api/admin/users'); aliasRevisions = data.revisions; $('admin-user').replaceChildren(...data.users.map(name => new Option(name, name))); }
     const value = String(identity.refresh_seconds); if (![...$('refresh').options].some(o => o.value === value)) $('refresh').add(new Option(`${value} seconds`, value));
     $('refresh').value = value; await refresh(true); setTimer();
   } catch (e) { logout(); notify(e.message, true); }
@@ -242,7 +261,7 @@ $('target-key').onchange = () => {
   catalog.clear(); expanded.clear(); projectId = ''; latest = null;
   refreshId++; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true);
 };
-$('admin-user').onchange = () => { catalog.clear(); expanded.clear(); latest = null; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true); };
+$('admin-user').onchange = () => { clearCredentials(); catalog.clear(); expanded.clear(); latest = null; draft.dirty = false; draft.epoch++; $('servers').replaceChildren(); updateActions(); refresh(true); };
 $('search').oninput = renderCards;
 $('refresh').onchange = setTimer;
 $('refresh-now').onclick = () => refresh();
@@ -271,9 +290,64 @@ $('apply').onclick = () => guarded(async () => {
   if (identity.orchestrator) await refresh(true);
 });
 window.addEventListener('beforeunload', event => { if (draft.dirty) { event.preventDefault(); event.returnValue = ''; } });
+async function selectAdminAlias(name) {
+  const {users, revisions} = await api('/api/admin/users');
+  aliasRevisions = revisions;
+  const select = $('admin-user');
+  select.replaceChildren(...users.map(user => new Option(user, user)));
+  if (users.includes(name)) select.value = name;
+  clearCredentials(); catalog.clear(); expanded.clear(); latest = null; refreshId++;
+  draft.reset({ceiling:{servers:{}}, revision:null}, true);
+  $('servers').replaceChildren(); updateActions();
+  if (select.value) await refresh(true);
+}
+$('create-alias').onclick = () => guarded(async () => {
+  const name = prompt('New bearer alias (starts with no MCP grants)')?.trim();
+  if (!name) return;
+  await api('/api/admin/users', {method:'POST', body:JSON.stringify({name})});
+  await selectAdminAlias(name); notify('Alias created with both bearers.');
+});
+$('rename-alias').onclick = () => guarded(async () => {
+  const old = $('admin-user').value;
+  const name = prompt('Rename bearer alias', old)?.trim();
+  if (!name || name === old) return;
+  await api(base() + '/name' + aliasRevision(), {method:'PUT', body:JSON.stringify({name})});
+  await selectAdminAlias(name); notify('Alias renamed.');
+});
+$('delete-alias').onclick = () => guarded(async () => {
+  const name = $('admin-user').value;
+  if (!confirm(`Delete ${name}, revoke its virtual key and Switcher login, and remove its saved projects?`)) return;
+  await api(base() + aliasRevision(), {method:'DELETE'});
+  await selectAdminAlias(); notify('Alias deleted.');
+});
+$('issue-login').onclick = () => guarded(async () => {
+  const name = $('admin-user').value;
+  if (!confirm(`Issue a personal Switcher login for ${name}? Any previous login bearer will stop working.`)) return;
+  clearCredentials();
+  await api(base() + '/login' + aliasRevision(), {method:'POST'});
+  await selectAdminAlias(name); notify('Switcher login issued.');
+});
+for (const kind of ['virtual', 'switcher']) {
+  const eye = $(kind + '-eye'), field = $(kind + '-value');
+  eye.onclick = () => guarded(async () => {
+    if (field.value) { clearCredentials(); return; }
+    const {value} = await api(base() + '/credentials/' + kind, {method:'POST'});
+    field.value = value;
+    eye.title = eye.getAttribute('aria-label').replace(/^Show /, 'Hide ');
+    eye.setAttribute('aria-label', eye.title);
+    eye.setAttribute('aria-pressed', 'true');
+  });
+  $(kind + '-copy').onclick = () => guarded(async () => {
+    const {value} = await api(base() + '/credentials/' + kind, {method:'POST'});
+    await navigator.clipboard.writeText(value);
+    notify('Bearer copied.');
+  });
+}
+window.addEventListener('pagehide', clearCredentials);
 $('rotate').onclick = () => guarded(async () => {
   const name = latest.target_key, path = base() + '/rotation';
   if (!confirm(`Do you really want to rotate the virtual bearer for ${name}?\n\nOnce the replacement is verified, the old bearer will stop working. Update external clients and Citadel mappings afterwards.`)) return;
+  clearCredentials();
   const storageKey = 'switcher.rotation.' + name;
   let request = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
   if (!request) {
@@ -284,6 +358,7 @@ $('rotate').onclick = () => guarded(async () => {
   try {
     const result = await api(path, {method:'POST', body:JSON.stringify(request)});
     if (['verified', 'conflict'].includes(result.status)) sessionStorage.removeItem(storageKey);
+    await selectAdminAlias(name);
     notify(result.message, result.status !== 'verified');
   } catch (error) {
     if (error.status === 409 && /fresh rotation preview/.test(error.message)) sessionStorage.removeItem(storageKey);

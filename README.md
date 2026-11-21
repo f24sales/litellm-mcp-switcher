@@ -235,7 +235,7 @@ Each chooser session has its own target. Two clients using the same orchestrator
 
 The Web UI shows a target dropdown for orchestrator logins. Each page keeps its own choice. REST callers select the target explicitly with `?key_name=research` on the normal `/api` endpoints; omission selects the first configured key. Projects remain owned by the target key, so its personal login and assigned orchestrators see the same presets.
 
-The injected environment is the source of truth for identities and assignments. Restart the Switcher after configuration changes. There is no environment-refresh tool; current MCP permissions and registry entries are read from LiteLLM through the existing state/discovery tools.
+The injected environment supplies bootstrap identities and assignments. Administrative alias edits are persisted in the private credentials journal and applied to both listeners. Restart the Switcher after configuration changes. There is no environment-refresh tool; current MCP permissions and registry entries are read from LiteLLM through the existing state/discovery tools.
 
 ### Upgrading an existing installation
 
@@ -276,6 +276,14 @@ Administrative login provides a user selector for editing ceilings. Normal users
 | `admin_set_access` | Replace the user's ceiling and cap active access accordingly |
 
 Tool listings and calls enforce roles, including calls using cached tool names. Read-only tools carry `readOnlyHint: true`. Tools that change selections/projects or send refresh notifications explicitly instruct agents to act **only on the user's request for that specific action**. Research, discovery, or an upstream error does not authorize unsolicited changes. These descriptions guide agents; authentication, ownership, ceilings, and always-on protection are enforced by the backend.
+
+### Managing bearer aliases in the Admin Web UI
+
+Select **New alias** to create a dedicated MCP-only LiteLLM key with empty grants and a personal Switcher login. **Rename** preserves both credentials, projects and orchestrator assignments. **Delete** confirms the selected alias, revokes its virtual key and login, removes assignments and deletes that alias’s projects. New aliases can be managed by the administrator and their personal login.
+
+Each credential has a masked field, an eye button and a copy button. Only an authenticated administrator can request a single credential. **Create login** issues a personal login for an existing alias. **Rotate login** invalidates the previous Switcher login. **Rotate** in the virtual bearer row uses the existing verified LiteLLM rotation. Update clients and any Citadel credential mappings that used a replaced bearer.
+
+Changes persist in the private rotation journal, including aliases originally loaded from the environment. Keep the journal, permissions file and project database together in private backups.
 
 ### Rotating a managed LiteLLM bearer
 

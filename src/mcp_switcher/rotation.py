@@ -234,6 +234,8 @@ class Rotation:
         async with self.service.key_locks[target.name]:
             with self.store.locked():
                 data = self.store.read()
+                if key_name in data.get("alias_changes", {}):
+                    raise Problem(409, "Complete the pending alias change before rotating")
                 self.refresh(data)
                 target = self.service.target(actor, key_name)
                 operation = data["operations"].get(operation_id)

@@ -1,4 +1,5 @@
 """Small LiteLLM management client; never returns upstream secrets."""
+import hashlib
 import json
 
 import httpx
@@ -112,6 +113,23 @@ class LiteLLM:
 
     async def restore_key_alias(self, key, alias):
         await self.request("POST", "/key/update", json={"key": key, "key_alias": alias})
+
+    async def managed_key_exists(self, key):
+        # Self-authentication also fails for expired/blocked keys. Check the
+        # management record before reporting a permanent deletion.
+        hashed = hashlib.sha256(key.encode()).hexdigest()
+        try:
+            response = await self.client.get("/key/info", params={"key": hashed},
+                                             headers={"Authorization": "Bearer " + self.admin})
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            info = response.json()["info"]
+            if not isinstance(info, dict):
+                raise ValueError
+            return info.get("status") != "deleted"
+        except (httpx.HTTPError, KeyError, ValueError):
+            raise Problem(502, "LiteLLM could not verify the managed key record") from None
 
     async def inspect_key(self, key):
         try:

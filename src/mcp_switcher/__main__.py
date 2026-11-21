@@ -27,10 +27,11 @@ async def serve():
     prefix = settings.mcp_switcher_db_prefix if settings.mcp_switcher_db_backend != "sqlite" else "litellm_mcp_switcher"
     db = Database(settings.database_url(), prefix)
     db.migrate()
-    db.initialize_owners([u.name for u in users if u.litellm_key and not u.admin])
+    db.initialize_owners([u.owner for u in users if u.litellm_key and not u.admin])
     upstream = LiteLLM(settings)
     service = Service(db, upstream, users, settings)
     try:
+        await service.aliases.recover()
         await service.rotation.recover()
         await prune_configured_access(service)
     except BaseException:

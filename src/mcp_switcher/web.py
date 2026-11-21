@@ -1,5 +1,6 @@
 """FastAPI endpoints; the browser retains a bearer only in page memory."""
 from pathlib import Path
+from typing import Literal
 import re
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -8,8 +9,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .aliases import alias_revision
 from .config import authenticate
-from .models import ApplyInput, Problem, ProjectInput, RevisionInput, RotateInput, ToggleInput
+from .models import AliasInput, ApplyInput, Problem, ProjectInput, RevisionInput, RotateInput, ToggleInput
 
 
 def create_web(service, identities):
@@ -103,6 +105,31 @@ def create_web(service, identities):
         if not user.admin:
             raise Problem(403, "Administrative access required")
 
+    @app.post("/api/admin/users")
+    async def create_alias(data: AliasInput, user=Depends(actor)):
+        return await service.aliases.change(user, "create", data.name)
+
+    @app.put("/api/admin/users/{name}/name")
+    async def rename_alias(name: str, data: AliasInput, revision: str, user=Depends(actor)):
+        return await service.aliases.change(user, "rename", name, data.name, revision)
+
+    @app.delete("/api/admin/users/{name}")
+    async def delete_alias(name: str, revision: str, user=Depends(actor)):
+        return await service.aliases.change(user, "delete", name, revision=revision)
+
+    @app.post("/api/admin/users/{name}/login")
+    async def issue_login(name: str, revision: str, user=Depends(actor)):
+        return await service.aliases.change(user, "login", name, revision=revision)
+
+    @app.post("/api/admin/users/{name}/credentials/{kind}")
+    async def reveal(name: str, kind: Literal["virtual", "switcher"], user=Depends(actor)):
+        admin(user)
+        target = service.target(user, name)
+        value = target.litellm_key if kind == "virtual" else target.bearer
+        if not value:
+            raise Problem(404, "No personal Switcher login has been created")
+        return {"value": value}
+
     @app.post("/api/admin/users/{name}/rotation/preview")
     async def preview_rotation(name: str, user=Depends(actor)):
         admin(user)
@@ -116,7 +143,7 @@ def create_web(service, identities):
     @app.get("/api/admin/users")
     async def users(user=Depends(actor)):
         admin(user)
-        return {"users": sorted(service.users)}
+        return {"users": sorted(service.users), "revisions": {n: alias_revision(u) for n, u in service.users.items()}}
 
     @app.get("/api/admin/users/{name}")
     async def user_state(name: str, user=Depends(actor)):

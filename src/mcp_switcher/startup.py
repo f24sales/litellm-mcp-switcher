@@ -39,7 +39,7 @@ async def prune_configured_access(service):
         write_key = (selected.model_dump() != info["_switcher_raw_active"] or outside_configuration(info)
                      or (not selected.servers and not key_deny))
         if write_team or write_key:
-            with service.db.lease(target.name, "ceiling", desired,
+            with service.db.lease(target.owner, "ceiling", desired,
                                   timeout=service.settings.litellm_request_timeout_seconds * 12 + 60) as op:
                 fresh_info, fresh_team, fresh_upper, fresh_active = await service.upstream.scope(
                     target, inventory, ignore_missing=True)
@@ -55,13 +55,13 @@ async def prune_configured_access(service):
                 verified, _, actual_upper, _ = await service.upstream.scope(target, inventory)
                 if {"ceiling": actual_upper.model_dump(), "active": verified["_switcher_raw_active"]} != desired:
                     raise Problem(502, f"LiteLLM did not confirm startup cleanup for {target.name}")
-                service.db.finish(target.name, op, "verified", "Configured MCP access verified at startup")
+                service.db.finish(target.owner, op, "verified", "Configured MCP access verified at startup")
             logging.warning("Startup MCP cleanup applied to bearer alias %s", target.name)
 
         # Presets belong to individual managed keys; retain their names and remaining tool filters.
-        for project in service.db.list_projects(target.name):
+        for project in service.db.list_projects(target.owner):
             before = Selection(**project["selection"])
             after = intersect(before, allowed)
             if before != after:
-                service.db.save_project(target.name, ProjectInput(name=project["name"], selection=after,
+                service.db.save_project(target.owner, ProjectInput(name=project["name"], selection=after,
                                         version=project["version"]), project["id"])

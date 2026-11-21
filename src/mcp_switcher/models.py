@@ -37,6 +37,11 @@ class ApplyInput(BaseModel):
     revision: str = Field(min_length=64, max_length=64)
 
 
+class AliasInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
 class RevisionInput(BaseModel):
     revision: str = Field(min_length=64, max_length=64)
 

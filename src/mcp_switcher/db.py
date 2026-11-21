@@ -122,5 +122,10 @@ class Database:
             if not changed:
                 raise Problem(409, "Project is missing or has changed")
 
+    def remove_owner(self, owner):
+        with self.engine.begin() as conn:
+            for table in (self.projects, self.operations):
+                conn.execute(table.delete().where(table.c.owner == owner))
+
     def close(self):
         self.engine.dispose()
