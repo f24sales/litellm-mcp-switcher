@@ -83,7 +83,7 @@ Import upstream servers into LiteLLM before selecting them. Register **each URL/
 | `tasks_personal` | `https://tasks.example.com/mcp` | Personal upstream bearer |
 | `tasks_work` | `https://tasks.example.com/mcp` | Work upstream bearer |
 
-These represent different upstream identities. LiteLLM retains their credentials; the Switcher selects their registry entries. Giving both aliases the same URL does not make their accounts interchangeable. The registry and tool lists are discovered dynamically; server and tool names are not hardcoded in the application.
+These represent different upstream identities. LiteLLM retains their credentials; the Switcher selects their registry entries. Giving both aliases the same URL does not make their accounts interchangeable. At startup the Switcher reads the tool lists for the full registry into one shared catalog. **Refresh tool catalog** refreshes all servers. The refresh icon beside a server’s tools refreshes that entry for all aliases. Each alias sees its permitted tools. The registry and tool lists are discovered dynamically; server and tool names are not hardcoded in the application.
 
 ## Setup order
 

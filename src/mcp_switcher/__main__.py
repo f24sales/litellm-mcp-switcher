@@ -53,6 +53,7 @@ async def serve():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     tasks = [asyncio.create_task(server.serve()) for server in servers]
+    service.tool_catalog.refresh_all()
     stopping = asyncio.create_task(stop.wait())
     try:
         done, _ = await asyncio.wait([*tasks, stopping], return_when=asyncio.FIRST_COMPLETED)
@@ -69,6 +70,7 @@ async def serve():
         except TimeoutError:
             for task in tasks:
                 task.cancel()
+        await service.tool_catalog.close()
         await upstream.close()
         db.close()
 

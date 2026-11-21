@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/static/app.css"><script type="module" src="/static/app.js"></script>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/" aria-label="Switcher home"><span class="mark">≋</span><span>MCP <strong>Switcher</strong></span></a><span class="tag">Powered by LiteLLM</span><div id="identity" hidden><span id="who"></span><button id="logout" class="quiet">Sign out</button></div></header>
+<header class="topbar"><a class="brand" href="/" aria-label="Switcher home"><span class="mark">≋</span><span>MCP <strong>Switcher</strong></span></a><span class="tag">Powered for LiteLLM</span><div id="identity" hidden><span id="who"></span><button id="logout" class="quiet">Sign out</button></div></header>
 <main>
 <section id="login" class="login panel">
   <span class="eyebrow">YOUR TOOLS, YOUR WORKFLOW</span>
@@ -18,7 +18,7 @@
   <p class="small">Your token stays in this page's memory. Reloading or signing out clears it.</p>
 </section>
 <div id="workspace" hidden>
-  <section class="intro"><div><span class="eyebrow" id="workspace-label">YOUR WORKSPACE</span><h1>Make room for focus.</h1><p id="mode-description">Choose your tools. Save a project. Apply when you're ready.</p></div><span id="selection-count" class="count"></span></section>
+  <section class="intro"><div><span class="eyebrow" id="workspace-label">YOUR WORKSPACE</span><p id="mode-description">Choose your tools. Save a project. Apply when you're ready.</p></div><span id="selection-count" class="count"></span></section>
   <section id="admin-bar" class="panel alias-admin" hidden>
     <div class="alias-selection">
       <div class="alias-picker">
@@ -58,7 +58,7 @@
   <section id="target-bar" class="panel toolbar" hidden><label for="target-key">Managed LiteLLM key</label><select id="target-key"></select><span class="small">Selections and projects belong to this key.</span></section>
   <section id="project-bar" class="panel toolbar"><label for="project">Project</label><select id="project"><option value="">Current LiteLLM selection</option></select><button id="new-project">New</button><button id="save-project">Save</button><button id="rename-project">Rename</button><button id="delete-project" class="quiet danger">Delete</button></section>
   <section class="controls"><div class="search"><label for="search" class="sr-only">Search servers</label><input id="search" type="search" placeholder="Find an MCP server…"></div><button id="select-all">Select all</button><button id="clear-all" class="quiet">Clear all</button></section>
-  <div class="sync"><span id="sync-state" role="status">Connecting…</span><label>Refresh <select id="refresh"><option value="0">Off</option><option value="10">10 seconds</option><option value="30" selected>30 seconds</option><option value="60">1 minute</option><option value="300">5 minutes</option></select></label><button id="refresh-now" class="quiet">Refresh now</button></div>
+  <div class="sync"><span id="sync-state" role="status">Connecting…</span><label>Refresh <select id="refresh"><option value="0">Off</option><option value="10">10 seconds</option><option value="30" selected>30 seconds</option><option value="60">1 minute</option><option value="300">5 minutes</option></select></label><button id="refresh-catalog" type="button" class="quiet" hidden>Refresh tool catalog</button><button id="refresh-now" class="quiet">Refresh now</button></div>
   <div id="conflict" class="notice" hidden>Access changed elsewhere. Your draft is preserved. Discard it to load the current state, then review your changes.</div>
   <div id="operation" class="notice" hidden></div>
   <section id="servers" class="grid" aria-label="MCP servers"></section>

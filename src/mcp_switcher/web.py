@@ -144,6 +144,12 @@ def create_web(service, identities):
         admin(user)
         return await service.rotation.execute(user, name, "rotate", data.revision, data.operation_id)
 
+    @app.post("/api/admin/tool-catalog/refresh", status_code=202)
+    async def refresh_catalog(user=Depends(actor)):
+        admin(user)
+        service.tool_catalog.refresh_all()
+        return {"refreshing": True}
+
     @app.get("/api/admin/users")
     async def users(user=Depends(actor)):
         admin(user)

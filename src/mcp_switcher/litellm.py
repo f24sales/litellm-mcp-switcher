@@ -164,12 +164,12 @@ class LiteLLM:
 
     async def tools(self, server_id):
         data = await self.request("GET", "/mcp-rest/tools/list", params={"server_id": server_id})
-        if data.get("status") in {"error", "failed"} or data.get("error"):
+        if not isinstance(data, dict) or data.get("status") in {"error", "failed"} or data.get("error"):
             raise Problem(502, "Upstream tool discovery failed")
         tools = data.get("tools")
-        if not isinstance(tools, list):
+        if not isinstance(tools, list) or any(not isinstance(t, dict) or not isinstance(t.get("name"), str) for t in tools):
             raise Problem(502, "Upstream tool discovery returned an invalid catalog")
-        return [{"name": t["name"], "description": (t.get("description") or "")[:1500]} for t in tools]
+        return [{"name": t["name"], "description": t["description"][:1500] if isinstance(t.get("description"), str) else ""} for t in tools]
 
     async def close(self):
         await self.client.aclose()

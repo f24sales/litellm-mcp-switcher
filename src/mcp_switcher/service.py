@@ -8,6 +8,7 @@ from dataclasses import replace
 from .models import Problem
 from .litellm import intersect
 from .rotation import Rotation
+from .tool_catalog import ToolCatalog
 from .models import ApplyInput
 from .permissions import edit, read
 
@@ -30,8 +31,7 @@ class Service:
         self.db, self.upstream, self.settings = db, upstream, settings
         self.identities = users
         self.users = {u.name: u for u in users if u.litellm_key and not u.admin}
-        self.discovery_limit = asyncio.Semaphore(3)
-        self.discovery = {}
+        self.tool_catalog = ToolCatalog(upstream)
         self.key_locks = {name: asyncio.Lock() for name in self.users}
         self.rotation = Rotation(self)
         from .aliases import AliasManager
@@ -96,7 +96,13 @@ class Service:
         operation = await self.reconcile(target, info, ceiling, active)
         visible = inventory if actor.admin or show_catalog and actor.orchestrator else [
             s for s in inventory if s["server_id"] in ceiling.servers]
-        state = {"user": target.name, "target_key": target.name, "admin": actor.admin, "servers": visible,
+        server_details = []
+        for server in visible:
+            entry = self.tool_catalog.entries.get(server["server_id"], {})
+            server_details.append({**server, "tool_status": entry.get("status", "pending"),
+                                "tool_revision": entry.get("revision", 0)})
+        state = {"catalog_refreshing": self.tool_catalog.refreshing, "catalog_error": self.tool_catalog.error,
+                 "user": target.name, "target_key": target.name, "admin": actor.admin, "servers": server_details,
                 "ceiling": ceiling.model_dump(), "active": active.model_dump(),
                 "always_on_mcps": list(self.always_on(target, inventory)),
                 "revision": revision(ceiling, active, info["_switcher_raw_active"], target.always_on_mcps, target.name),
@@ -119,17 +125,7 @@ class Service:
         if server_id not in {s["server_id"] for s in inventory} or (
                 not actor.admin and server_id not in ceiling.servers):
             raise Problem(403, "Server is outside this user's administrative access")
-        async with self.discovery_limit:
-            entry = self.discovery.get(server_id)
-            if refresh or not entry or time.monotonic() - entry[0] > 60:
-                try:
-                    tools = await self.upstream.tools(server_id)
-                    entry = (time.monotonic(), {"status": "reachable", "tools": tools})
-                except Problem:
-                    entry = (time.monotonic(), {"status": "error", "tools": [],
-                             "message": "Tool discovery failed; saved access has been preserved"})
-                self.discovery[server_id] = entry
-        result = dict(entry[1])
+        result = dict(await self.tool_catalog.get(server_id, refresh=refresh))
         if not actor.admin and ceiling.servers[server_id] is not None:
             result["tools"] = [t for t in result["tools"] if t["name"] in ceiling.servers[server_id]]
         return result

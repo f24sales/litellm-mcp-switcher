@@ -66,3 +66,18 @@ input.active-switch:disabled:checked{background:#768797;border-color:#687786}
   .credential-actions { justify-self: start; }
   .alias-create { align-items: start; flex-direction: column; }
 }
+
+.tool-disclosure { position: relative; }
+.tool-disclosure summary { padding-right: 3.5rem; min-height: 42px; }
+.tool-refresh {
+  position: absolute;
+  top: 4px;
+  right: .75rem;
+  min-width: 36px;
+  height: 34px;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  border-color: transparent;
+  font-size: 1.25rem;
+}

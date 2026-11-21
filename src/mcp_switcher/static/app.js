@@ -15,10 +15,11 @@ async function api(path, options = {}) {
     path += `${path.includes('?') ? '&' : '?'}key_name=${encodeURIComponent($('target-key').value)}`;
   }
   const response = await fetch(path, { ...options, headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {})}, cache: 'no-store' });
-  const data = await response.json();
+  const data = await response.json().catch(() => null);
+  if (response.ok && data === null) throw new Error('Switcher returned an unreadable response. Refresh to retry.');
   if (!response.ok) {
     if (response.status === 401) logout();
-    throw Object.assign(new Error(typeof data.detail === 'string' ? data.detail : `Request rejected (${response.status})`), {status:response.status});
+    throw Object.assign(new Error(typeof data?.detail === 'string' ? data.detail : `Switcher request failed (HTTP ${response.status}).`), {status:response.status});
   }
   return data;
 }
@@ -75,6 +76,9 @@ function updateActions() {
   $('delete-login').disabled = busy || !canDeleteLogin;
   $('logout').disabled = busy;
   $('refresh-now').disabled = busy;
+  $('refresh-catalog').hidden = !identity?.admin;
+  $('refresh-catalog').disabled = busy || latest?.catalog_refreshing;
+  $('refresh-catalog').textContent = latest?.catalog_refreshing ? 'Refreshing tool catalog…' : 'Refresh tool catalog';
   $('save-config').hidden = !identity?.admin;
   $('save-config').disabled = busy || latest?.config_changed !== true || draft.dirty || draft.conflict ||
     ['pending', 'uncertain'].includes(latest?.operation.status);
@@ -104,14 +108,20 @@ async function refresh(force = false) {
   try {
     const state = await api(path);
     if (id !== refreshId || path !== statePath()) return;
+    for (const server of state.servers) {
+      const sid = server.server_id, cached = catalog.get(sid);
+      if (cached && (cached.revision !== server.tool_revision ||
+          JSON.stringify(latest?.ceiling.servers[sid]) !== JSON.stringify(state.ceiling.servers[sid]))) catalog.delete(sid);
+    }
     latest = state;
     if (identity.orchestrator) $('apply-note').textContent = `Applies to every client using LiteLLM key ${state.target_key}.`;
     if (force) draft.reset(state, identity.admin); else draft.accept(state, epoch, identity.admin);
     preserveAlwaysOn(draft.selection, state.always_on_mcps);
     rebuildProjects(); renderCards(); updateActions();
-    $('sync-state').textContent = `Synced ${new Date().toLocaleTimeString()}`;
+    $('sync-state').textContent = state.catalog_error || `Synced ${new Date().toLocaleTimeString()}`;
     $('operation').hidden = !['pending', 'uncertain', 'conflict'].includes(state.operation.status);
     $('operation').textContent = state.operation.message || '';
+    if (state.catalog_refreshing) pollCatalog();
   } catch (e) { $('sync-state').textContent = 'Refresh failed · your selection is preserved'; notify(e.message, true); }
 }
 function renderCards() {
@@ -163,7 +173,8 @@ function renderCards() {
     }
     heading.append(title, node('div', server.alias, 'alias'));
     const entry = catalog.get(sid);
-    head.append(check, heading, node('span', entry?.status || 'unknown', `status ${entry?.status || ''}`));
+    const status = entry?.status || server.tool_status || 'pending';
+    head.append(check, heading, node('span', status === 'pending' ? 'Not checked yet' : status, `status ${status}`));
     card.append(head);
     const details = node('details'); details.open = expanded.has(sid);
     const chosen = draft.selection.servers[sid];
@@ -172,19 +183,33 @@ function renderCards() {
     details.append(summary, body);
     if (details.open) renderTools(sid, body);
     details.ontoggle = async () => {
+      if (!details.isConnected) return;
       if (!details.open) { expanded.delete(sid); return; }
       expanded.add(sid);
       if (!catalog.has(sid)) {
         body.replaceChildren(node('p', 'Discovering tools…'));
-        const target = latest.target_key;
+        const target = latest.target_key, permission = JSON.stringify(latest.ceiling.servers[sid]);
         try { const result = await api(`${base()}/servers/${encodeURIComponent(sid)}/tools`);
-          if (latest?.target_key !== target) return;
+          if (latest?.target_key !== target || JSON.stringify(latest.ceiling.servers[sid]) !== permission) return;
           catalog.set(sid, result); }
         catch (e) { if (latest?.target_key !== target) return; catalog.set(sid, {status:'error', tools:[], message:e.message}); }
         if (details.isConnected && details.open) renderCards();
       }
     };
-    if (allowed || identity.admin) card.append(details);
+    if (allowed || identity.admin) {
+      const section = node('div', '', 'tool-disclosure');
+      const reload = node('button', '↻', 'tool-refresh');
+      reload.type = 'button'; reload.title = 'Refresh tools for ' + (server.alias || server.server_name);
+      reload.setAttribute('aria-label', reload.title);
+      reload.onclick = () => guarded(async () => {
+        const target = latest.target_key;
+        const result = await api(`${base()}/servers/${encodeURIComponent(sid)}/tools?refresh=true`);
+        if (latest?.target_key !== target) return;
+        catalog.set(sid, result); expanded.add(sid); renderCards();
+        if (result.status === 'error') notify(result.message, true);
+      });
+      section.append(details, reload); card.append(section);
+    }
     root.append(card);
   }
 }
@@ -193,12 +218,7 @@ function renderTools(sid, body) {
   if (!entry) { body.append(node('p', 'Discovering tools…')); return; }
   if (entry.status !== 'reachable') {
     body.append(node('p', entry.message || 'Tool discovery failed. Saved access is preserved.'));
-    const retry = node('button', 'Retry discovery'); retry.onclick = async () => {
-      const target = latest.target_key;
-      try { const result = await api(`${base()}/servers/${encodeURIComponent(sid)}/tools?refresh=true`);
-        if (latest?.target_key !== target) return; catalog.set(sid, result); renderCards(); }
-      catch (e) { notify(e.message, true); }
-    }; body.append(retry); return;
+    return;
   }
   const selected = Object.hasOwn(draft.selection.servers, sid);
   const pinned = latest.always_on_mcps?.includes(sid);
@@ -273,6 +293,17 @@ $('admin-user').onchange = () => { clearCredentials(); catalog.clear(); expanded
 $('search').oninput = renderCards;
 $('refresh').onchange = setTimer;
 $('refresh-now').onclick = () => refresh();
+$('refresh-catalog').onclick = () => guarded(async () => {
+  await api('/api/admin/tool-catalog/refresh', {method:'POST'});
+  await refresh();
+});
+let catalogTimer;
+function pollCatalog() {
+  clearTimeout(catalogTimer);
+  catalogTimer = setTimeout(async () => {
+    if (identity && latest?.catalog_refreshing) await refresh();
+  }, 2500);
+}
 $('select-all').onclick = () => { for (const server of latest.servers) if (identity.admin || Object.hasOwn(latest.ceiling.servers, server.server_id)) draft.selection.servers[server.server_id] = null; selectionChanged(); };
 $('clear-all').onclick = () => { draft.selection.servers = {}; selectionChanged(); };
 $('discard').onclick = () => { projectId = ''; refresh(true); };
