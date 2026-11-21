@@ -13,9 +13,8 @@ def create_dummy_mcp():
     server = FastMCP(ALIAS)
 
     @server.tool(annotations={"readOnlyHint": True})
-    def hello() -> str:
-        """Check the connection through LiteLLM."""
-        return "Hello World"
+    def hello_world() -> str:
+        return "hello world"
 
     return server
 
