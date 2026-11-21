@@ -5,7 +5,7 @@ from fastmcp import FastMCP
 
 from .models import Problem
 
-ALIAS = "switcher-dummy"
+ALIAS = "switcher_dummy"
 PORT = 8001
 
 
@@ -36,7 +36,7 @@ async def ensure_registered(upstream, url):
         # UUID still binds the alias to the configured URL in that view.
         if (len(matches) != 1 or matches[0].get("url") not in (url, None)
                 or any(matches[0].get(k) != v for k, v in spec.items() if k != "url")):
-            raise Problem(409, "The switcher-dummy registry entry does not match the configured private endpoint")
+            raise Problem(409, "The switcher_dummy registry entry does not match the configured private endpoint")
         return matches[0]["server_id"]
 
     registered = await lookup()
@@ -52,5 +52,5 @@ async def ensure_registered(upstream, url):
         raise
     server_id = await lookup()
     if not server_id:
-        raise Problem(502, "LiteLLM did not confirm switcher-dummy registration")
+        raise Problem(502, "LiteLLM did not confirm switcher_dummy registration")
     return server_id

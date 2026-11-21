@@ -43,7 +43,8 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch, d
                          == req.url.params["key"]), None)
             return httpx.Response(200, json={"info": info}) if info else httpx.Response(404)
         if path == "/v1/mcp/server" and req.method == "POST":
-            assert not any(r.get("alias") == "switcher-dummy" for r in fake.registry)
+            assert "-" not in body["server_name"]
+            assert not any(r.get("alias") == "switcher_dummy" for r in fake.registry)
             fake.registry.append({**body, "url": None})
             return httpx.Response(201, json={"server_id": body["server_id"]})
         if path == "/team/new":
@@ -109,7 +110,7 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch, d
                 expected = [server_id] if dummy_enabled else ["no-mcp-servers"]
                 assert fake.keys[value]["object_permission"]["mcp_servers"] == expected
                 assert fake.teams[fake.keys[value]["team_id"]]["object_permission"]["mcp_servers"] == expected
-                assert restarted()["client"].allowed_mcps == (("switcher-dummy",) if dummy_enabled else ())
+                assert restarted()["client"].allowed_mcps == (("switcher_dummy",) if dummy_enabled else ())
         assert restarted()["client"] == service.users["client"]
         assert (await c.put(root + "/alice/name", params=await rev("alice"), json={"name": "renamed"})).status_code == 200
         assert restarted()["operator"].key_names == ("renamed", "bob")
