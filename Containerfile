@@ -35,5 +35,5 @@ COPY --chown=switcher:switcher config.sh env.example config.conf_example contain
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER switcher
 WORKDIR /etc/litellm-mcp-switcher
-EXPOSE 8080 8000
+EXPOSE 8080 8000 8001
 ENTRYPOINT ["litellm-mcp-switcher"]

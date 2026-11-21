@@ -8,6 +8,7 @@ import secrets
 import uuid
 
 from .config import Identity
+from . import dummy_mcp
 from .litellm import merge_permission
 from .models import Problem, Selection
 from .permissions import edit, read
@@ -53,6 +54,9 @@ class AliasManager:
                         self.validate_name(new if kind == "rename" else name)
                     if kind == "create":
                         op = {"source": "+" + uuid.uuid4().hex, "team": str(uuid.uuid4())}
+                        if self.service.settings.dummy_mcp:
+                            op["dummy_server_id"] = await dummy_mcp.ensure_registered(
+                                self.service.upstream, self.service.settings.dummy_mcp_url)
                     else:
                         target = self.service.target(actor, name)
                         if alias_revision(target) != revision:
@@ -90,7 +94,8 @@ class AliasManager:
     async def provision(self, data, op):
         upstream = self.service.upstream
         key, team, name = op.get("key"), op["team"], op["name"]
-        permission = merge_permission({}, Selection())
+        server_id = op.get("dummy_server_id")
+        permission = merge_permission({}, Selection(servers={server_id: None} if server_id else {}))
         marker = {"mcp_switcher_owner": op["source"]}
         try:
             await upstream.request("POST", "/team/new", json={"team_id": team, "team_alias": "mcp-switcher-" + name,
@@ -131,7 +136,8 @@ class AliasManager:
                 op["key"] = key
                 self.store.write(data)
             info = await upstream.inspect_key(key)
-        if not info or info.get("team_id") != team or info.get("key_alias") != "mcp-switcher-" + name:
+        if (not info or info.get("team_id") != team or info.get("key_alias") != "mcp-switcher-" + name
+                or (info.get("object_permission") or {}).get("mcp_servers") != permission["mcp_servers"]):
             raise Problem(502, "New virtual key could not be verified")
 
     async def confirm_upstream(self, data, op):
@@ -164,12 +170,13 @@ class AliasManager:
             await self.confirm_upstream(data, op)
             op["confirmed"] = True
             self.store.write(data)
+        initial_grants = [dummy_mcp.ALIAS] if op.get("dummy_server_id") else []
         catalog = data.setdefault("catalog", {})
         record = catalog.setdefault(source, {"name": name})
         if kind in ("create", "rename", "delete"):
             with edit(self.service.settings.permissions_file) as entries:
                 if kind == "create":
-                    entries.setdefault(name, [])
+                    entries.setdefault(name, initial_grants)
                 elif kind == "rename" and name in entries:
                     entries[new] = entries.pop(name)
                 elif kind == "delete":
@@ -178,7 +185,7 @@ class AliasManager:
         old = users.get(name)
         if kind == "create":
             record.update(seed=op["key"], login=op.get("login", ""))
-            target = Identity(name, record["login"], record["seed"], source=source)
+            target = Identity(name, record["login"], record["seed"], source=source, allowed_mcps=tuple(initial_grants))
             self.service.db.initialize_owners([source])
         elif kind == "delete":
             if source.startswith("+"):

@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     permissions_file: str = "permissions/permissions.json"
     icon_directory: str = "/opt/f24sales/litellm-mcp-switcher/icons"
     mcp_enabled: bool = True
+    dummy_mcp: bool = True
+    dummy_mcp_url: str = "http://litellm-mcp-switcher:8001/mcp"
     webui_refresh_seconds: int = Field(default=30, ge=5, le=3600)
     rotation_credentials_file: str = "/opt/f24sales/litellm-mcp-switcher/sqlite/rotation-credentials.json"
     mcp_switcher_db_backend: str = "sqlite"

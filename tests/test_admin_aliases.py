@@ -3,13 +3,16 @@ import json
 import secrets
 
 import httpx
+import pytest
 from mcp_switcher.config import load_configuration
 from mcp_switcher.models import ProjectInput, Selection
 from mcp_switcher.web import create_web
 
 
-async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
+@pytest.mark.parametrize("dummy_enabled", [True, False])
+async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch, dummy_enabled):
     service, fake, identities = setup
+    service.settings.dummy_mcp = dummy_enabled
     admin, alice, bob = identities
     from mcp_switcher.config import Identity
     op = Identity("operator", "operator-" + "s" * 32, key_names=("alice", "bob"))
@@ -38,6 +41,10 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
             info = next((v for k, v in fake.keys.items() if hashlib.sha256(k.encode()).hexdigest()
                          == req.url.params["key"]), None)
             return httpx.Response(200, json={"info": info}) if info else httpx.Response(404)
+        if path == "/v1/mcp/server" and req.method == "POST":
+            assert not any(r.get("alias") == "switcher-dummy" for r in fake.registry)
+            fake.registry.append({**body, "server_id": "dummy-id"})
+            return httpx.Response(201, json={"server_id": "dummy-id"})
         if path == "/team/new":
             fake.teams[body["team_id"]] = body
         elif path == "/team/info":
@@ -97,7 +104,10 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch):
             value = r.json()["value"]
             assert value not in (await c.get(root)).text
             if kind == "virtual":
-                assert fake.keys[value]["object_permission"]["mcp_servers"] == ["no-mcp-servers"]
+                expected = ["dummy-id"] if dummy_enabled else ["no-mcp-servers"]
+                assert fake.keys[value]["object_permission"]["mcp_servers"] == expected
+                assert fake.teams[fake.keys[value]["team_id"]]["object_permission"]["mcp_servers"] == expected
+                assert restarted()["client"].allowed_mcps == (("switcher-dummy",) if dummy_enabled else ())
         assert restarted()["client"] == service.users["client"]
         assert (await c.put(root + "/alice/name", params=await rev("alice"), json={"name": "renamed"})).status_code == 200
         assert restarted()["operator"].key_names == ("renamed", "bob")

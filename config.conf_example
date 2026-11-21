@@ -11,6 +11,13 @@ LITELLM_MCP_SWITCHER_WEBUI_ENABLED=1
 #default-preset: 1
 LITELLM_MCP_SWITCHER_MCP_ENABLED=1
 
+# Internal hello() MCP. Grant and activate it for each new WebUI alias.
+#choices: 0 1
+#default-preset: 1
+LITELLM_MCP_SWITCHER_DUMMY_MCP=1
+# Address reachable by LiteLLM on the shared container network.
+LITELLM_MCP_SWITCHER_DUMMY_MCP_URL=http://litellm-mcp-switcher:8001/mcp
+
 LITELLM_MCP_SWITCHER_WEBUI_REFRESH_SECONDS=30
 
 # Private durable credentials journal; preserve this mount even with PostgreSQL/MariaDB.

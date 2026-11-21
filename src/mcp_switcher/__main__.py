@@ -8,6 +8,7 @@ import uvicorn
 
 from .config import load_configuration
 from .db import Database
+from . import dummy_mcp
 from .litellm import LiteLLM
 from .mcp import create_mcp
 from .service import Service
@@ -43,6 +44,8 @@ async def serve():
         apps.append((create_web(service, users), 8080))
     if settings.mcp_enabled:
         apps.append((create_mcp(service, users).http_app(path="/mcp", stateless_http=True), 8000))
+    if settings.dummy_mcp:
+        apps.append((dummy_mcp.create_dummy_mcp().http_app(path="/mcp", stateless_http=True), dummy_mcp.PORT))
     servers = [Server(uvicorn.Config(app, host="0.0.0.0", port=port, access_log=False,
                                     log_level="warning", timeout_graceful_shutdown=10)) for app, port in apps]
     stop = asyncio.Event()
