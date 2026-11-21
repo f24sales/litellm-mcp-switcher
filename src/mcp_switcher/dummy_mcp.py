@@ -1,4 +1,6 @@
 """The internal connectivity MCP granted to newly created WebUI aliases."""
+import uuid
+
 from fastmcp import FastMCP
 
 from .models import Problem
@@ -19,7 +21,8 @@ def create_dummy_mcp():
 
 
 async def ensure_registered(upstream, url):
-    spec = {"server_name": ALIAS, "alias": ALIAS, "url": url, "transport": "http",
+    server_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
+    spec = {"server_id": server_id, "server_name": ALIAS, "alias": ALIAS, "url": url, "transport": "http",
             "allow_all_keys": False, "available_on_public_internet": False}
 
     async def lookup():
@@ -29,13 +32,16 @@ async def ensure_registered(upstream, url):
         matches = [row for row in registry if ALIAS in (row.get("alias"), row.get("server_name"))]
         if not matches:
             return None
-        if len(matches) != 1 or any(matches[0].get(k) != v for k, v in spec.items()) or not matches[0].get("server_id"):
+        # LiteLLM hides backend URLs from scoped management keys. The registered
+        # UUID still binds the alias to the configured URL in that view.
+        if (len(matches) != 1 or matches[0].get("url") not in (url, None)
+                or any(matches[0].get(k) != v for k, v in spec.items() if k != "url")):
             raise Problem(409, "The switcher-dummy registry entry does not match the configured private endpoint")
         return matches[0]["server_id"]
 
-    server_id = await lookup()
-    if server_id:
-        return server_id
+    registered = await lookup()
+    if registered:
+        return registered
     try:
         await upstream.request("POST", "/v1/mcp/server", json=spec)
     except Problem:

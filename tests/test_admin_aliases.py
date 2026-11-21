@@ -1,6 +1,7 @@
 import hashlib
 import json
 import secrets
+import uuid
 
 import httpx
 import pytest
@@ -43,8 +44,8 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch, d
             return httpx.Response(200, json={"info": info}) if info else httpx.Response(404)
         if path == "/v1/mcp/server" and req.method == "POST":
             assert not any(r.get("alias") == "switcher-dummy" for r in fake.registry)
-            fake.registry.append({**body, "server_id": "dummy-id"})
-            return httpx.Response(201, json={"server_id": "dummy-id"})
+            fake.registry.append({**body, "url": None})
+            return httpx.Response(201, json={"server_id": body["server_id"]})
         if path == "/team/new":
             fake.teams[body["team_id"]] = body
         elif path == "/team/info":
@@ -104,7 +105,8 @@ async def test_aliases_logins_reveal_and_restart(setup, tmp_path, monkeypatch, d
             value = r.json()["value"]
             assert value not in (await c.get(root)).text
             if kind == "virtual":
-                expected = ["dummy-id"] if dummy_enabled else ["no-mcp-servers"]
+                server_id = str(uuid.uuid5(uuid.NAMESPACE_URL, service.settings.dummy_mcp_url))
+                expected = [server_id] if dummy_enabled else ["no-mcp-servers"]
                 assert fake.keys[value]["object_permission"]["mcp_servers"] == expected
                 assert fake.teams[fake.keys[value]["team_id"]]["object_permission"]["mcp_servers"] == expected
                 assert restarted()["client"].allowed_mcps == (("switcher-dummy",) if dummy_enabled else ())
