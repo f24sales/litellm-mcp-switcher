@@ -1,4 +1,6 @@
 """Curated MCP management tools with per-call identity and role checks."""
+from base64 import b64encode
+from pathlib import Path
 from typing import Literal
 
 from fastmcp import FastMCP
@@ -6,6 +8,9 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier, require_scopes
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.sessions import create_session, get_session, InvalidSession
+
+from mcp.types import Icon
+from starlette.responses import Response
 
 from .config import authenticate
 from .models import ApplyInput, Problem, ProjectInput, Selection
@@ -29,7 +34,14 @@ def create_mcp(service, identities):
                 scopes=(["admin"] if user.admin else ["user", "orchestrator"] if user.orchestrator else ["user"]),
                 claims={"sub": user.name})
 
-    mcp = FastMCP("LiteLLM MCP Switcher", auth=Verifier(), mask_error_details=True)
+    icon_svg = (Path(__file__).parent / "static" / "mcp-switcher-mcp.svg").read_bytes()
+    icon = Icon(src="data:image/svg+xml;base64," + b64encode(icon_svg).decode("ascii"),
+                mimeType="image/svg+xml", sizes=["any"])
+    mcp = FastMCP("LiteLLM MCP Switcher", auth=Verifier(), icons=[icon], mask_error_details=True)
+
+    @mcp.custom_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
+    async def favicon(request):
+        return Response(icon_svg, media_type="image/svg+xml")
 
     def actor(admin=False):
         token = get_access_token()

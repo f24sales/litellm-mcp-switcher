@@ -1,3 +1,4 @@
+from base64 import b64decode
 import json
 
 import httpx
@@ -46,7 +47,13 @@ def test_mcp_http_auth_catalog_and_cached_admin_call(setup):
         status, _ = rpc(client, "unknown", "tools/list")
         assert status == 401
         init = {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}
-        assert rpc(client, users[1].bearer, "initialize", init)[0] == 200
+        status, initialized = rpc(client, users[1].bearer, "initialize", init)
+        assert status == 200
+        icon = initialized["result"]["serverInfo"]["icons"][0]
+        favicon = client.get("/favicon.svg")
+        assert favicon.status_code == 200 and favicon.headers["content-type"] == "image/svg+xml"
+        assert icon["src"].startswith("data:image/svg+xml;base64,")
+        assert b64decode(icon["src"].split(",", 1)[1]) == favicon.content
         status, data = rpc(client, users[1].bearer, "tools/list")
         assert status == 200
         names = {t["name"] for t in data["result"]["tools"]}

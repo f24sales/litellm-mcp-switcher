@@ -4,14 +4,6 @@ https://your-host.example:2012 {
 }
 
 https://your-host.example:2013 {
-    @favicon {
-        method GET HEAD
-        path /favicon.svg
-    }
-    handle @favicon {
-        root * /etc/caddy/mcp-switcher
-        file_server
-    }
     @discovery {
         method GET HEAD
         path /

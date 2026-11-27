@@ -407,7 +407,7 @@ Versioned tags use `YYYY.M.N` and are immutable; increment `project.version` aft
 
 Validate Caddy before reloading. The example uses separate HTTPS frontends: port 2012 forwards Web UI and REST to internal port 8080; port 2013 forwards MCP to internal port 8000, with its endpoint at `/mcp`. The MCP frontend's root is a small discovery page, marked so Citadel does not classify it as a second Web UI. Neither internal application port needs host publication. Keep authentication enabled in the application. Preserve existing Caddy imports and register both frontends through the installation's normal Citadel scan.
 
-Both frontends use the same wave favicon. Copy `src/mcp_switcher/static/favicon.svg` to the Caddy configuration directory as `mcp-switcher/favicon.svg`; the example serves that file on the MCP frontend independently of the Web UI listener. The Web UI serves its packaged copy at `/static/favicon.svg`.
+The Web UI serves its header and tab icon at `/static/favicon.svg`. The MCP listener serves its own icon at `/favicon.svg` and includes the same SVG in the MCP initialization response. The example proxy passes the favicon request to the MCP listener. For an existing Caddy static-file setup, use `src/mcp_switcher/static/mcp-switcher-mcp.svg` as `mcp-switcher/favicon.svg`.
 
 Image builds, dependency tests, database tests and restart tests run only on GitHub-hosted Actions runners. Local infrastructure pulls exclusively through the installation's Smart1 `images.json` inventory and `sudo ./podman-smart1.sh --update`; no implicit pulls on starts. The deployment Quadlet uses `Pull=never`.
 
